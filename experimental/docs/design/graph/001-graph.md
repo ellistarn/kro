@@ -3,7 +3,7 @@
 A Graph is kro's primitive for composing Kubernetes resources. It is a scope —
 a set of resources with a shared lifecycle, dependency order, and data flow.
 Create a Graph and its resources are created and continuously reconciled.
-Delete it and they are cascade deleted. Nested Graphs create nested scopes.
+Delete it and its resources are cleaned up. Nested Graphs create nested scopes.
 
 ## Object
 
@@ -87,8 +87,8 @@ on the resource kind:
 
 #### template
 
-A Kubernetes object to create and own. The Graph applies it via server-side
-apply and cascade deletes it when the Graph is deleted. Template fields can
+A Kubernetes resource to apply and manage. The Graph applies it and manages
+its lifecycle. Template fields can
 contain CEL expressions (`${...}`) that reference other resources in scope.
 
 #### externalRef
@@ -174,27 +174,20 @@ also excluded. Exclusion is contagious through the dependency graph.
 
 ### Contribution
 
-A template that underspecifies a resource — omitting required fields or
-specifying only status and metadata — is a contribution. The controller detects
-this from the template shape against the resource's OpenAPI schema and applies
-it as a partial server-side apply with force ownership, leaving the rest of the
-object untouched. This is how a Graph writes status back to an external object.
+A template that targets an existing resource and specifies only a subset of
+its fields is a contribution. This is how a Graph writes status back to an
+external object or adds fields to a resource managed elsewhere.
 
-Contributions typically reference an externalRef by id in their template (e.g.,
-`${webapp.metadata.name}`), which creates an implicit dependency through CEL
-reference inference — the Graph reconciles the externalRef first, ensuring the
-target object exists before writing. The contribution auto-splits into two API calls when the
-template contains `.status` fields — one for metadata/spec via regular SSA, one
-for the status subresource. Graph authors do not need to know about the
-Kubernetes subresource split.
-
-The Graph's status surfaces which resources were detected as contributions,
-making the inference observable. If the OpenAPI schema is unavailable or
-incorrect, the detection is visible in status rather than silently falling
-back to a full apply.
+Contributions typically reference another resource by id in their template
+(e.g., `${webapp.metadata.name}`), which creates an implicit dependency
+through CEL reference inference — the Graph reconciles the referenced
+resource first, ensuring the target object exists before writing. The
+contribution auto-splits into two API calls when the template contains
+`.status` fields — one for metadata/spec via the main resource, one for the
+status subresource. Graph authors do not need to know about the Kubernetes
+subresource split.
 
 ```yaml
-# webapp is an externalRef reading the WebApp instance
 - id: statusContrib
   template:
     apiVersion: kro.run/v1alpha1
@@ -307,7 +300,7 @@ Alarm on `False` or `Unknown` for too long.
 | `Ready`             | All resources reconciled                               |
 | `DataPending`       | CEL expressions cannot resolve; waiting for data       |
 | `ResourcesNotReady` | Resources applied but readyWhen conditions not met     |
-| `FieldConflict`     | SSA 409 — another actor owns fields the Graph manages  |
+| `FieldConflict`     | Another actor manages fields the Graph also manages    |
 | `ReconcileError`    | Fatal error during reconciliation                      |
 
 ```yaml
@@ -334,40 +327,25 @@ subresource.
 
 ### Tracking
 
-Managed resources are tracked via labels (`internal.kro.run/graph-name`,
-`internal.kro.run/graph-namespace`), not ownerReferences. OwnerReferences require
-same-scope (namespace → namespace or cluster → cluster) and bind to UIDs that
-break on delete+recreate. Labels work across scope boundaries.
+Managed resources are tracked by the controller, not via ownerReferences.
+OwnerReferences require same-scope (namespace → namespace or cluster →
+cluster) and bind to UIDs that break on delete+recreate.
 
-A finalizer on the Graph object ensures managed resources are cleaned up before
-the Graph is removed from the API server.
+A finalizer on the Graph object ensures managed resources are cleaned up
+before the Graph is removed from the API server. See 004-ownership for
+tracking and field ownership mechanics.
 
 ### Deletion
 
-When a Graph is deleted, the controller deletes resources it successfully
-applied — identified by the presence of a template-hash annotation
-(`internal.kro.run/template-hash`) that proves the controller applied to them.
-Resources that were never successfully applied (e.g., pre-existing objects that
-caused a conflict on first apply) are not deleted. The resource pre-existed the
-Graph and should survive its deletion.
-
+When a Graph is deleted, the controller cleans up resources it applied.
 Deletion unwinds in reverse dependency order. Child Graphs have their own
-finalizers — the parent waits for each child to complete its own cleanup chain
-before proceeding.
-
-### Field Ownership
-
-Owned resources are applied via server-side apply without force. If another
-actor has taken ownership of a field the controller previously owned, the apply
-returns a 409 Conflict. The controller surfaces this as a status condition
-rather than silently overwriting. The conflict is permanent until the external
-actor releases the field or the Graph spec changes.
-
-Contributions are the exception — they apply with force because their purpose
-is writing fields on objects someone else owns.
+finalizers — the parent waits for each child to complete its own cleanup
+chain before proceeding.
 
 ## Not Covered
 
+- **Ownership.** Field ownership, tracking, adoption, migration, and
+  conflict detection. See 004-ownership.
 - **Revisions.** Immutable snapshots of Graph state. See 002-revisions.
 - **Performance.** Content-addressed apply gating, expression caching, metadata
   watch elision. See 003-performance.
@@ -378,7 +356,7 @@ is writing fields on objects someone else owns.
 
 **OwnerReferences for lifecycle binding.** OwnerReferences don't work across
 scope boundaries (namespace-scoped Graph owning cluster-scoped CRD, or vice
-versa). They bind to UIDs that break on delete+recreate. Labels plus finalizers
+versa). They bind to UIDs that break on delete+recreate. Finalizers
 work universally and survive object recreation.
 
 **Manual dependency ordering.** CEL reference analysis derives the graph
@@ -391,15 +369,3 @@ expressions. This creates injection vectors, makes each level's behavior depend
 on all prior levels, and prevents independent debugging. The current model —
 one evaluation pass per controller, with the API server as the boundary — makes
 each level independently observable and testable.
-
-**ForceOwnership on owned resources.** Would silently steal fields from other
-actors. The 409 Conflict signal is correct — it surfaces a real problem (two
-actors managing the same field) rather than hiding it. Contributions use
-ForceOwnership because writing to someone else's object is their explicit
-purpose.
-
-**OwnerReferences for deletion tracking.** Same cross-scope problem as
-lifecycle binding. The annotation-based tracking (`internal.kro.run/applied-resources`)
-records what the controller successfully applied, and the template-hash
-annotation (`internal.kro.run/template-hash`) provides proof of ownership. Together they enable safe cleanup
-without UID-based references.
