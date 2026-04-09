@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gobuffalo/flect"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -75,17 +76,14 @@ func graphFieldOwner(graph *unstructured.Unstructured) client.FieldOwner {
 	return client.FieldOwner("kro.run/" + graph.GetNamespace() + "/" + graph.GetName())
 }
 
-// gvkToGVR converts a GVK to a GVR using simple pluralization.
+// gvkToGVR converts a GVK to a GVR using English pluralization rules.
+// Uses flect.Pluralize for correct handling of irregular plurals
+// (e.g., NetworkPolicy → networkpolicies, Ingress → ingresses).
 func gvkToGVR(gvk schema.GroupVersionKind) schema.GroupVersionResource {
-	resource := strings.ToLower(gvk.Kind) + "s"
-	switch strings.ToLower(gvk.Kind) {
-	case "ingress":
-		resource = "ingresses"
-	}
 	return schema.GroupVersionResource{
 		Group:    gvk.Group,
 		Version:  gvk.Version,
-		Resource: resource,
+		Resource: flect.Pluralize(strings.ToLower(gvk.Kind)),
 	}
 }
 
