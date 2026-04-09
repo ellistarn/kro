@@ -16,7 +16,6 @@ const (
 	StateActive     = "Active"
 	StateInProgress = "InProgress"
 	StateError      = "Error"
-	StateDeleting   = "Deleting"
 )
 
 // Condition types
