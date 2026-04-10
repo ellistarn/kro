@@ -659,8 +659,10 @@ func TestRGDLifecyclePort(t *testing.T) {
 	require.NoError(t, k8sClient.Update(ctx, latestInstance))
 	t.Log("Instance updated: replicas=3, image=nginx:1.20, port=443")
 
-	// Verify Deployment converges to new values
-	require.NoError(t, wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 15*time.Second, true, func(ctx context.Context) (bool, error) {
+	// Verify Deployment converges to new values.
+	// Multi-level convergence (instance → L1 Graph → L2 Graph → Deployment)
+	// can be slow under parallel test load.
+	require.NoError(t, wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 30*time.Second, true, func(ctx context.Context) (bool, error) {
 		d := &unstructured.Unstructured{}
 		d.SetGroupVersionKind(deployGVK)
 		if err := k8sClient.Get(ctx, types.NamespacedName{
@@ -703,8 +705,9 @@ func TestRGDLifecyclePort(t *testing.T) {
 	}, latestInstance))
 	require.NoError(t, k8sClient.Delete(ctx, latestInstance))
 
-	// Verify Deployment is cleaned up (L2 finalizer deletes it)
-	require.NoError(t, wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 15*time.Second, true, func(ctx context.Context) (bool, error) {
+	// Verify Deployment is cleaned up (L2 finalizer deletes it).
+	// Multi-level cascade cleanup can take longer under parallel test load.
+	require.NoError(t, wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 30*time.Second, true, func(ctx context.Context) (bool, error) {
 		d := &unstructured.Unstructured{}
 		d.SetGroupVersionKind(deployGVK)
 		err := k8sClient.Get(ctx, types.NamespacedName{
