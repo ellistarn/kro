@@ -211,8 +211,8 @@ the controller iterates this set to know which resources need cleanup and how (d
 release for Contribute). The applied set records resource keys. Template shape and subresource
 information are derived from the revision spec.
 
-Template hash annotations on resources provide change detection. Hash match → skip the apply. This
-is a performance optimization — the controller converges on spec change, not continuously.
+Template hash labels on resources provide change detection. Hash match → skip the apply. This is a
+performance optimization — the controller converges on spec change, not continuously.
 
 ### Skeleton Apply
 
