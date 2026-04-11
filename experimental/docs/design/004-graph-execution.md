@@ -48,7 +48,7 @@ A node evaluates when any of these hold:
 - First reconcile or revision transition (all nodes)
 
 Deterministic errors (4xx) are not retried — same inputs produce the same failure. They resolve via
-cascade (upstream input changes), revision transition (user fixes the spec), or `next-sync` (the
+propagation (upstream input changes), revision transition (user fixes the spec), or `next-sync` (the
 consistency floor).
 
 Otherwise — skip. O(1) per skipped node.
@@ -58,14 +58,24 @@ expressions reference (determined statically at graph compilation from expressio
 input is the union of all downstream-referenced paths. Absent paths hash to a fixed sentinel value
 that is not a valid Kubernetes field value — the transition from absent to present is a change, not
 a skip. If the hash changed — or no previous hash exists — dependents evaluate when visited later in
-topological order. If not, cascade stops. Changes flow forward through the DAG and stop when they
+topological order. If not, propagation stops. Changes flow forward through the DAG and stop when they
 stop mattering.
 
 Every apply writes a `next-sync` label — a jittered future timestamp (default 5 minutes, jitter
 up to the sync interval). When it expires, the template hash changes (new timestamp value), SSA
 apply fires, and drift is corrected as a side effect. Jitter is per-node, baked into the label, so
 expirations are naturally decorrelated across nodes. This replaces periodic full-graph resync with
-amortized per-node resync.
+amortized per-node resync. The reconciler returns `RequeueAfter` set to the minimum `next-sync`
+expiration across all nodes minus current time, ensuring expiration is detected promptly even when
+no watch events fire.
+
+`next-sync` is read from the managed resource's label, not generated fresh each reconcile. During
+template hash computation, the controller includes the existing `next-sync` value in the desired
+state. When `next-sync` has not expired, the desired state includes the same timestamp as the managed
+resource — the template hash matches and the write is skipped. When `next-sync` has expired, the
+controller generates a new jittered timestamp — the template hash differs and SSA apply fires,
+correcting drift as a side effect. This read-back cycle is what makes `next-sync` both sticky
+(no apply every reconcile) and triggering (apply on expiration).
 
 The controller uses metadata-only informers — labels are visible, annotations are not. Full object
 reads happen only during evaluation (step 5). When an evaluated node needs data from a skipped
@@ -83,7 +93,8 @@ controller-internal fields.
 | `graph-name`, `graph-generation`, `node-id` | Managed resource labels | Watch routing, ownership |
 | `template-hash` | Managed resource label | Skip write if desired state unchanged |
 | `next-sync` | Managed resource label | Resync scheduling |
-| `cascadeHash`, `resolvedKey`, `appliedKeys` | Revision status (per-node) | Graph topology state |
+| `resolvedKey`, `appliedKeys` | Revision status (per-node) | Graph topology state |
+| Propagation hash | In-memory (per reconcile pass) | Skip downstream evaluation |
 
 ### Wind
 
@@ -98,7 +109,7 @@ current-reconcile state for dependencies, which is always available.
    dependency's resolution cannot make the node viable while the Excluded dependency is absent.
 3. **propagateWhen** — any dependency's propagateWhen unsatisfied → gate. Template not re-evaluated.
    Previous plan state retained (or Pending if never evaluated). Gate takes precedence over
-   triggers. When the gate opens on a later reconcile, the node evaluates with current informer
+   triggers. When the gate opens on a later reconcile, the node evaluates with current cluster
    state — changes during the gate period are visible at that point.
 4. **includeWhen** — false → Excluded.
 5. **Dispatch:**
@@ -109,12 +120,13 @@ current-reconcile state for dependencies, which is always available.
      `template-hash` label on managed resource. Match → skip write. Differs → SSA apply.
    - Contribute: same as Owns but force-apply. Auto-splits status subresource.
 6. **readyWhen** — Ready or NotReady. Data is in scope regardless.
-7. **Cascade check** — hash the specific field paths dependents reference (union of downstream CEL
-   access chains) + propagateWhen state, compare against `cascadeHash` in revision status. Differs
-   → mark re-evaluated. Matches → cascade stops.
+7. **Propagation check** — hash the specific field paths dependents reference (union of downstream CEL
+   access chains) + propagateWhen state, compare against the previous reconcile's in-memory
+   propagation hash. Differs → mark re-evaluated. Matches → propagation stops. On first pass after
+   restart, no previous value exists — all nodes evaluate through step 5.
 
 Node's data enters scope after processing. Two hashing boundaries: template hash (step 5) skips the
-write, cascade hash (step 7) skips downstream evaluation.
+write, propagation hash (step 7) skips downstream evaluation.
 
 ### Plan States
 
@@ -168,7 +180,9 @@ Prune candidates = union of superseded revisions' applied sets − active revisi
 forEach children use the same managed resource labels and annotations as static nodes (`next-sync`,
 `template-hash`). The parent's entry in revision status holds all children's `appliedKeys` — children
 do not get individual revision status entries (scaling: a forEach with 1000 items would bloat the
-revision status otherwise).
+revision status otherwise). Propagation hashes for children are held in-memory like all other nodes —
+children can have dependents without storage model constraints. Since children are dynamic cardinality,
+in-memory propagation hashes avoid cleanup logic for children that no longer exist.
 
 ## forEach
 
@@ -189,21 +203,22 @@ independent node in the DAG with its own template, hash, and dependency edges.
                      └─────────┘ └─────────┘ └─────────┘
 ```
 
-**The parent node** evaluates the collection expression and caches each item's last-known state,
-keyed by the item's identity (stable name or UID, not array position). The parent completes when all
-children have been processed — applied and in scope. Downstream nodes that depend on the forEach
-proceed once the parent completes. They do not wait for every child to satisfy readyWhen — data
-availability is the gate, not health.
+**The parent node** evaluates the collection expression and holds each item's last-known state
+in-memory, keyed by the item's identity (stable name or UID, not array position). On restart, no
+cached state exists — the full collection is re-evaluated and all children are processed (consistent
+with the "first reconcile" trigger). The parent completes when all children have been processed —
+applied and in scope. Downstream nodes that depend on the forEach proceed once the parent completes.
+They do not wait for every child to satisfy readyWhen — data availability is the gate, not health.
 
 **Child nodes** bind the iterator variable to their item and evaluate the template independently.
 Each child is identified by the collection item it's bound to. If the collection returns items in a
 different order, the children are the same — same identities, same templates, no churn.
 
-**On reconcile,** the parent diffs the current collection against the cached state:
+**On reconcile,** the parent diffs the current collection against the previous state:
 
 1. Re-evaluate the collection expression
-2. Diff item identities against cached identities — detect adds, removes, changes
-3. Changed items: update cached state, re-evaluate that child's template
+2. Diff item identities against previous identities — detect adds, removes, changes
+3. Changed items: update state, re-evaluate that child's template
 4. Unchanged items: skip template evaluation
 
 forEach evaluates only changed items, not the entire collection. The identity diff is negligible.
@@ -360,8 +375,8 @@ Level 1:  deploy (Owns)       policies (forEach parent)
 Level 2:  service (Owns)     pol/a  pol/b  pol/c  (forEach children)
 ```
 
-Two independent branches. A change to config cascades through the left branch — deploy and service
-are evaluated, the right branch skips. A change to a Namespace cascades through the right branch —
+Two independent branches. A change to config propagates through the left branch — deploy and service
+are evaluated, the right branch skips. A change to a Namespace propagates through the right branch —
 policies and children are evaluated, the left branch skips.
 
 ## Revision Transitions
@@ -403,19 +418,19 @@ a revision transition.
 
 **Event 1: ConfigMap updated** — `data.image` changed to `nginx:1.26`.
 
-Watch event fires for node `config`. Walk iterates all nodes; dirty propagation cascades through the
+Watch event fires for node `config`. Walk iterates all nodes; changes propagate through the
 left branch:
 
 | Node       | Triggered? | Dep re-evaluated? | Action                                                                    | Result   |
 |------------|------------|--------------------|---------------------------------------------------------------------------|----------|
-| config     | Yes        | —                  | Read from informer → hash referenced paths → differs → re-evaluated              | Ready    |
+| config     | Yes        | —                  | GET full object → propagation hash differs → re-evaluated                        | Ready    |
 | namespaces | No         | No                 | Skip                                                                      | —        |
 | deploy     | No         | Yes (config)       | Evaluate template (config in scope) → hash differs → SSA apply            | NotReady |
 | service    | No         | Yes (deploy)       | propagateWhen unsatisfied (rollout in progress) → retain previous state   | Ready    |
 | policies   | No         | No                 | Skip                                                                      | —        |
 | pol/ns-\*  | No         | No                 | Skip                                                                      | —        |
 
-1 apply. Service gated by propagateWhen. Right branch untouched — no trigger, no cascade.
+1 apply. Service gated by propagateWhen. Right branch untouched — no trigger, no propagation.
 
 When the rollout completes, a Deployment status watch fires for `deploy`:
 
@@ -423,7 +438,7 @@ When the rollout completes, a Deployment status watch fires for `deploy`:
 |------------|------------|--------------------|--------------------------------------------------------------------------------|--------|
 | config     | No         | No                 | Skip                                                                           | —      |
 | namespaces | No         | No                 | Skip                                                                           | —      |
-| deploy     | Yes        | No                 | Read from informer → propagateWhen now satisfied → cascade (gate changed) | Ready  |
+| deploy     | Yes        | No                 | GET full object → propagateWhen now satisfied → propagation (gate changed) | Ready  |
 | service    | No         | Yes (deploy)       | Evaluate template (deploy in scope) → hash matches → skip write           | Ready  |
 | policies   | No         | No                 | Skip                                                                           | —      |
 | pol/ns-\*  | No         | No                 | Skip                                                                           | —      |
@@ -435,12 +450,12 @@ evaluates but template output unchanged — write skipped.
 
 **Event 2: Namespace added** — Namespace `d` created.
 
-Watch event fires for node `namespaces`. Dirty propagation cascades through the right branch:
+Watch event fires for node `namespaces`. Changes propagate through the right branch:
 
 | Node                         | Triggered? | Dep re-evaluated?  | Action                                     | Result |
 |------------------------------|------------|--------------------|--------------------------------------------|--------|
 | config                       | No         | No                 | Skip                                       | —      |
-| namespaces                   | Yes        | —                  | Read from informer → 4 namespaces → differs | Ready  |
+| namespaces                   | Yes        | —                  | GET matching objects → 4 namespaces → propagation hash differs | Ready  |
 | deploy                       | No         | No                 | Skip                                       | —      |
 | service                      | No         | No                 | Skip                                       | —      |
 | policies                     | No         | Yes (namespaces)   | Diff items: new key `d`. a, b, c unchanged | Ready  |
@@ -453,18 +468,17 @@ Watch event fires for node `namespaces`. Dirty propagation cascades through the 
 
 **Event 3: Spec change** — `monitoring` added (depends on `deploy`), `service` removed. New revision.
 
-All nodes treated as triggered (revision transition — DAG structure changed). Cascade hashes are
-computed and stored but do not gate evaluation — every node passes the skip check because all are
-triggered:
+All nodes treated as triggered (revision transition — DAG structure changed). Propagation hashes are
+computed but do not gate evaluation — every node passes the skip check because all are triggered:
 
-| Node       | Action                                                          | Result |
-|------------|-----------------------------------------------------------------|--------|
-| config     | Read from informer → cascade hash unchanged → no apply          | Ready  |
-| namespaces | Read from informer → cascade hash unchanged → no apply          | Ready  |
-| deploy     | Read from informer → cascade hash unchanged → no apply          | Ready  |
-| monitoring | New node → evaluate template → SSA apply                        | Ready  |
-| policies   | Read from informer → cascade hash unchanged → no apply          | Ready  |
-| pol/ns-\*  | Item unchanged → skip template evaluation                       | Ready  |
+| Node       | Action                                                                                | Result |
+|------------|---------------------------------------------------------------------------------------|--------|
+| config     | GET full object → propagation hash unchanged → propagation stops                      | Ready  |
+| namespaces | GET matching objects → propagation hash unchanged → propagation stops                 | Ready  |
+| deploy     | Evaluate template → template hash unchanged → skip write; propagation hash unchanged  | Ready  |
+| monitoring | New node → evaluate template → SSA apply                                              | Ready  |
+| policies   | Evaluate collection → item set unchanged → propagation stops                          | Ready  |
+| pol/ns-\*  | Item unchanged → skip template evaluation                                             | Ready  |
 
 Active revision's applied set: {deploy, monitoring, pol/ns-a, pol/ns-b, pol/ns-c, pol/ns-d}.
 Previous revision's applied set included `service`. Prune: delete service.
@@ -556,7 +570,7 @@ merges. A full iteration with O(1) skip is simpler and effectively equivalent.
 
 **Full-object change checks.** `metadata.resourceVersion` changes on every update. Full-object
 hashing always differs. Field-path-scoped hashing is the correct mechanism — only changes to the
-specific paths that dependents reference trigger cascade.
+specific paths that dependents reference trigger propagation.
 
 **forEach as a monolithic node.** Re-evaluating all children when one item changes is wasted work
 proportional to the collection size. Parent-with-children evaluates only changed items.

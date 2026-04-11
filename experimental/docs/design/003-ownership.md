@@ -212,7 +212,8 @@ release for Contribute). The applied set records resource keys. Template shape a
 information are derived from the revision spec.
 
 Template hash labels on resources provide change detection. Hash match → skip the apply. This is a
-performance optimization — the controller converges on spec change, not continuously.
+performance optimization — the controller converges on spec change and periodically via `next-sync`,
+not on every reconcile.
 
 ### Skeleton Apply
 

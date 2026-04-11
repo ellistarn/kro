@@ -102,13 +102,13 @@ what needs to be re-interpreted. This is the migration path.
   controller stops observing a superseded revision — its Ready condition reflects the last-known
   state, not a live signal.
 - **`nodes`** — per-node operational state, keyed by node ID. Each entry contains:
-  - `cascadeHash` — hash of the specific field paths dependents reference + propagateWhen state
   - `resolvedKey` — GVK + namespace + name of the managed resource
   - `appliedKeys` — resource keys this node has written to the cluster (the applied set)
 
   The revision spec is immutable (what to apply). The revision status is the controller's scratchpad
-  (what happened when it did). On restart, the controller reads status to resume without
-  re-evaluating everything.
+  (what happened when it did). On restart, the controller reads status to resume — applied keys and
+  resolved keys are recovered from status, propagation hashes are recomputed on the first reconcile pass
+  (all nodes evaluate, equivalent to a revision transition).
 
 ## Lifecycle
 
