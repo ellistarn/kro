@@ -137,7 +137,7 @@ Each evaluated node lands in exactly one state:
 | Excluded    | includeWhen false              | Excluded   | includeWhen inputs change |
 | Blocked     | Dependency in error state      | Blocked    | Dependency resolves       |
 | Conflict    | Field ownership contested      | Blocked    | Backoff retry, then `next-sync` |
-| Error       | Client request failed (4xx)    | Blocked    | Cascade, revision, or `next-sync` |
+| Error       | Client request failed (4xx)    | Blocked    | Propagation, revision, or `next-sync` |
 | SystemError | Server/infra failure (5xx)     | Blocked    | Backoff retry, then `next-sync` |
 
 Ready and NotReady are both "applied and in scope." readyWhen is a health signal — it does not gate
