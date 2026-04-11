@@ -62,20 +62,17 @@ topological order. If not, propagation stops. Changes flow forward through the D
 stop mattering.
 
 Every apply writes a `next-sync` label — a jittered future timestamp (default 5 minutes, jitter
-up to the sync interval). When it expires, the template hash changes (new timestamp value), SSA
-apply fires, and drift is corrected as a side effect. Jitter is per-node, baked into the label, so
-expirations are naturally decorrelated across nodes. This replaces periodic full-graph resync with
-amortized per-node resync. The reconciler returns `RequeueAfter` set to the minimum `next-sync`
-expiration across all nodes minus current time, ensuring expiration is detected promptly even when
-no watch events fire.
-
-`next-sync` is read from the managed resource's label, not generated fresh each reconcile. During
-template hash computation, the controller includes the existing `next-sync` value in the desired
-state. When `next-sync` has not expired, the desired state includes the same timestamp as the managed
-resource — the template hash matches and the write is skipped. When `next-sync` has expired, the
-controller generates a new jittered timestamp — the template hash differs and SSA apply fires,
-correcting drift as a side effect. This read-back cycle is what makes `next-sync` both sticky
-(no apply every reconcile) and triggering (apply on expiration).
+up to the sync interval). `next-sync` is read from the managed resource's label, not generated fresh
+each reconcile. During template hash computation, the controller includes the existing `next-sync`
+value in the desired state. When `next-sync` has not expired, the desired state includes the same
+timestamp as the managed resource — the template hash matches and the write is skipped. When
+`next-sync` has expired, the controller generates a new jittered timestamp — the template hash
+differs and SSA apply fires, correcting drift as a side effect. This read-back cycle is what makes
+`next-sync` both sticky (no apply every reconcile) and triggering (apply on expiration). Jitter is
+per-node, baked into the label, so expirations are naturally decorrelated across nodes. This replaces
+periodic full-graph resync with amortized per-node resync. The reconciler returns `RequeueAfter` set
+to the minimum `next-sync` expiration across all nodes minus current time, ensuring expiration is
+detected promptly even when no watch events fire.
 
 The controller uses metadata-only informers — labels are visible, annotations are not. Full object
 reads happen only during evaluation (step 5). When an evaluated node needs data from a skipped
