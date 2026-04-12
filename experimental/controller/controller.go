@@ -331,7 +331,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	inflight := 0
 	// dispatched guards against double-dispatch: when a node has multiple
 	// parents that complete, each parent's completion calls tryDispatch on
-	// shared dependents. Without this guard the second call sees NodePending
+	// shared dependents. Without this guard the second call sees nodeUnvisited
 	// (state hasn't changed yet) and spawns a duplicate goroutine — two
 	// goroutines writing to the same maps causes concurrent-map-writes panic.
 	// Coordinator-local (single-threaded), no synchronization needed.
@@ -340,7 +340,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	// reconcile (via the skip path) but whose dispatch eligibility remains
 	// open. This separates "outputs available" from "evaluation complete."
 	// A skipped node makes its outputs available so dependents can check
-	// dependencies, but stays NodePending so a propagation trigger can
+	// dependencies, but stays nodeUnvisited so a propagation trigger can
 	// reclaim it for re-evaluation later in the same walk.
 	outputsReady := make(map[string]bool, len(dag.Nodes))
 	var nodeErrors []string // "nodeID: reason" for status reporting
@@ -354,7 +354,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	tryDispatch = func(idx int) {
 		node := &dag.Nodes[idx]
 
-		if plan.States[node.ID] != NodePending {
+		if plan.States[node.ID] != nodeUnvisited {
 			return // already processed or excluded
 		}
 		if dispatched[idx] {
@@ -372,7 +372,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		// Per 004-graph-execution.md § Wind step 1: retain previous evaluation.
 		//
 		// Carry forward previous outputs (scope, keys, propagateWhen) so
-		// dependents can read them, but leave plan.States as NodePending.
+		// dependents can read them, but leave plan.States as nodeUnvisited.
 		// This keeps the node dispatch-eligible: if a propagation trigger
 		// arrives later in this walk (upstream output changed), tryDispatch
 		// can reclaim the node for re-evaluation. Setting NodeReady here
@@ -426,7 +426,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 			switch depState {
 			case NodeReady, NodeNotReady:
 				continue // resolved, good
-			case NodePending:
+			case nodeUnvisited:
 				// Dependency still inflight — unless its outputs are ready
 				// from the skip path (previous reconcile's state carried forward).
 				if outputsReady[depID] {
@@ -437,7 +437,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 						case NodeExcluded:
 							hasExcluded = true
 							continue
-						case NodeDataPending:
+						case NodePending:
 							hasPending = true
 							continue
 						default:
@@ -450,7 +450,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 				hasInflight = true
 			case NodeExcluded:
 				hasExcluded = true
-			case NodeDataPending:
+			case NodePending:
 				// Dependency data not yet available — this node inherits Pending.
 				hasPending = true
 			default:
@@ -468,7 +468,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 			return
 		}
 		if hasPending {
-			plan.SetState(dag, node.ID, NodeDataPending)
+			plan.SetState(dag, node.ID, NodePending)
 			return
 		}
 		if hasInflight {
@@ -492,7 +492,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 				// Per 004-graph-execution.md § Wind step 3: "If never evaluated,
 				// the node remains Pending — dependents see a dependency that
 				// hasn't produced data and inherit Pending."
-				plan.States[node.ID] = NodeDataPending
+				plan.States[node.ID] = NodePending
 			}
 			// Dispatch dependents — this node retained previous state but
 			// dependents still need to be evaluated.
@@ -650,8 +650,8 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		if len(node.IncludeWhen) > 0 {
 			included, err := eval.includeWhen(node.IncludeWhen)
 			if err != nil {
-				if errors.Is(err, ErrDataPending) {
-					plan.SetState(dag, node.ID, NodeDataPending)
+				if errors.Is(err, ErrPending) {
+					plan.SetState(dag, node.ID, NodePending)
 				} else {
 					plan.SetState(dag, node.ID, NodeError)
 				}
@@ -677,8 +677,8 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 			resolved, err := r.resolveReference(ctx, graph, *node, workerEval)
 			if err != nil {
 				// Reference resolution failed — treat like a node error.
-				nodeState := NodeDataPending
-				if !errors.Is(err, ErrDataPending) {
+				nodeState := NodePending
+				if !errors.Is(err, ErrPending) {
 					info := classifyAPIError(err)
 					nodeState = info.state
 				}
@@ -696,8 +696,8 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 			state := NodeReady
 			if err != nil {
 				switch {
-				case errors.Is(err, ErrDataPending):
-					state = NodeDataPending
+				case errors.Is(err, ErrPending):
+					state = NodePending
 				case errors.Is(err, ErrWaitingForReadiness):
 					state = NodeNotReady
 				case errors.Is(err, ErrFieldConflict):
@@ -772,15 +772,15 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 			}
 			continue
 		}
-		if res.state == NodeDataPending {
-			plan.SetState(dag, node.ID, NodeDataPending)
+		if res.state == NodePending {
+			plan.SetState(dag, node.ID, NodePending)
 			// Reset Contributes reference when a conflicted target disappears.
 			if state.resolvedReferences[node.ID] == ReferenceContributes &&
 				state.previousPlanStates[node.ID] == NodeConflict {
 				state.resolvedReferences[node.ID] = ReferenceUnresolved
 				delete(state.previousInputHashes, node.ID)
 			}
-			state.previousPlanStates[node.ID] = NodeDataPending
+			state.previousPlanStates[node.ID] = NodePending
 			state.previousScope[node.ID] = res.scopeValue
 			state.previousKeys[node.ID] = res.keys
 			logger.V(1).Info("data pending for node", "node", node.ID, "error", res.err)
@@ -894,7 +894,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	// Restore their previous state for the plan summary (status reporting).
 	walkAttempted = true
 	for nodeID := range outputsReady {
-		if plan.States[nodeID] == NodePending {
+		if plan.States[nodeID] == nodeUnvisited {
 			if prevState, ok := state.previousPlanStates[nodeID]; ok {
 				plan.States[nodeID] = prevState
 			}
@@ -910,7 +910,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	// Belt-and-suspenders: the prune gate also blocks on these states, but key
 	// retention is the surgical fallback if the gate logic ever changes.
 	for _, node := range dag.Nodes {
-		if plan.States[node.ID] == NodeBlocked || plan.States[node.ID] == NodeDataPending {
+		if plan.States[node.ID] == NodeBlocked || plan.States[node.ID] == NodePending {
 			if prevKeys, ok := state.previousKeys[node.ID]; ok {
 				appliedKeys = append(appliedKeys, prevKeys...)
 			}
@@ -936,7 +936,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	// Per 004-graph-execution.md § Prune: "Uncertain absence (Pending, Blocked,
 	// Error, SystemError) blocks pruning — the resource might reappear once the
 	// blocker resolves."
-	pruneSafe := !summary.HasDataPending && !summary.HasBlocked && !summary.HasError && !summary.HasSystemError
+	pruneSafe := !summary.HasPending && !summary.HasBlocked && !summary.HasError && !summary.HasSystemError
 	if pruneSafe {
 		allPreviousKeys := map[string]bool{}
 		logger.V(1).Info("prune gate open", "previousAppliedKeys", len(state.previousAppliedKeys), "deferredPruneKeys", len(state.deferredPruneKeys), "superseded", len(supersededRevisions))
@@ -1009,7 +1009,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 				// Per 004-graph-execution.md § Finalization: the controller
 				// waits for readyWhen before deleting the target. This floor
 				// ensures the gate is re-checked even if the watch event is
-				// delayed. Same principle as the NodeDataPending 1s timer,
+				// delayed. Same principle as the NodePending 1s timer,
 				// but graph-level (not per-node) so it doesn't touch the
 				// drift timer map.
 				requeueFloor = finalizationRequeueInterval
@@ -1040,7 +1040,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		accepted:       true,
 		nodeCount:      len(revisionSpec.Nodes),
 		appliedCount:   summary.ReadyCount,
-		hasDataPending: summary.HasDataPending,
+		hasPending:     summary.HasPending,
 		hasNotReady:    summary.HasNotReady,
 		hasBlocked:     summary.HasBlocked,
 		hasConflict:    summary.HasConflict,
@@ -1055,7 +1055,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	// The graph is fully converged when every node is Ready and the spec is
 	// accepted. Everything else — errors, conflicts, pending data, not-ready
 	// — retries via watch events, not periodic requeue.
-	allReady := rstate.accepted && !summary.HasDataPending && !summary.HasNotReady &&
+	allReady := rstate.accepted && !summary.HasPending && !summary.HasNotReady &&
 		!summary.HasBlocked && !summary.HasConflict && !summary.HasError && !summary.HasSystemError
 	r.updateRevisionStatus(ctx, activeRevision, supersededRevisions, allReady, pruneOK && !prunePending)
 
@@ -1064,9 +1064,9 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	// drift timer." We reset on evaluation (Ready or NotReady) since
 	// the node was fully processed.
 	//
-	// For nodes in transient non-converged states (DataPending,
+	// For nodes in transient non-converged states (Pending,
 	// SystemError), set a short drift timer so they retry quickly.
-	// DataPending: the common case (dependency resolves → propagation
+	// Pending: the common case (dependency resolves → propagation
 	// trigger) is watch-driven. The 1s timer is a fallback for edge
 	// cases where no watch event arrives — e.g., externally deleted
 	// owned resource where the delete event was consumed but the
@@ -1080,7 +1080,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		switch nodeState {
 		case NodeReady, NodeNotReady:
 			state.resetDriftTimer(node.ID, defaultDriftInterval, maxDriftJitter)
-		case NodeDataPending:
+		case NodePending:
 			state.resetDriftTimer(node.ID, 1*time.Second, 0)
 		case NodeSystemError:
 			state.resetDriftTimer(node.ID, systemErrorRequeueInterval, 0)
@@ -1093,7 +1093,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	// ... Informer resyncs trigger all nodes simultaneously — correlated,
 	// expensive. Per-node drift timers with jitter amortize resync."
 	//
-	// Non-converged nodes (DataPending, SystemError) have short drift
+	// Non-converged nodes (Pending, SystemError) have short drift
 	// timers set above, so the earliest expiry reflects urgency.
 	//
 	// requeueFloor provides an explicit lower bound independent of drift
