@@ -242,6 +242,19 @@ func extractRevisionSpec(revision *unstructured.Unstructured) (*GraphSpec, error
 // createRevision creates a GraphRevision in the cluster with a finalizer.
 // The spec is immutable — enforced by CEL validation (self == oldSelf) on
 // the GraphRevision CRD. See: experimental/docs/design/002-revisions.md
+//
+// The finalizer is load-bearing for superseded revisions. After a controller
+// restart, the three sources for allPreviousKeys in the prune phase are:
+//
+//	(1) deriveAppliedSet — watch cache, requires an active informer for the GVR
+//	(2) state.previousAppliedKeys — in-memory, lost on restart
+//	(3) superseded revision static keys — extracted from the revision object
+//
+// Source (3) is what covers cross-GVR transitions after restart: if g00001
+// managed a Deployment and g00002 changes to a ConfigMap, the controller
+// only sets up a ConfigMap informer for g00002. Without g00001 in the API
+// server, source (3) is unavailable and the Deployment is orphaned. The
+// finalizer holds g00001 until the controller has processed the transition.
 func createRevision(ctx context.Context, c client.Client, revision *unstructured.Unstructured) error {
 	controllerutil.AddFinalizer(revision, finalizer)
 	return c.Create(ctx, revision)
