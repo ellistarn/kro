@@ -216,7 +216,7 @@ const (
 	NodeReady                        // Applied and readyWhen satisfied
 	NodeNotReady                     // Applied but readyWhen not satisfied
 	NodeExcluded                     // Definitive absence: excluded by includeWhen evaluating to false
-	NodeBlocked                      // Uncertain absence: dependency in Error/Conflict/SystemError/DataPending
+	NodeBlocked                      // Uncertain absence: dependency in Error/Conflict/SystemError/Blocked state
 	NodeDataPending                  // CEL expression couldn't resolve (retryable)
 	NodeError                        // Client request failed (4xx)
 	NodeConflict                     // SSA 409 — field ownership taken by another actor
@@ -291,16 +291,23 @@ func (ps *PlanState) DependencyPropagateBlocked(node *Node) string {
 
 // SetState updates a node's state and propagates to dependents.
 // NodeExcluded propagates as NodeExcluded (definitive absence).
-// NodeBlocked, NodeDataPending, NodeError, NodeConflict, NodeSystemError
-// propagate as NodeBlocked (uncertain absence).
+// NodeDataPending propagates as NodeDataPending (uncertain absence — data not yet available).
+// NodeBlocked, NodeError, NodeConflict, NodeSystemError propagate as NodeBlocked
+// (uncertain absence — dependency in error state).
 // NotReady does NOT propagate — data is in scope regardless.
+//
+// Per 004-graph-execution.md § Wind step 2: "Any dependency in an error state
+// (Conflict, Error, SystemError, or Blocked) → inherit Blocked. Any dependency
+// Pending → inherit Pending."
 func (ps *PlanState) SetState(dag *DAG, id string, state NodeState) {
 	ps.States[id] = state
 
 	switch state {
 	case NodeExcluded:
 		ps.propagateState(dag, id, NodeExcluded)
-	case NodeBlocked, NodeDataPending, NodeError, NodeConflict, NodeSystemError:
+	case NodeDataPending:
+		ps.propagateState(dag, id, NodeDataPending)
+	case NodeBlocked, NodeError, NodeConflict, NodeSystemError:
 		ps.propagateState(dag, id, NodeBlocked)
 	}
 }
@@ -309,6 +316,12 @@ func (ps *PlanState) SetState(dag *DAG, id string, state NodeState) {
 // Uses the Dependents reverse adjacency list for O(V+E) traversal — not a linear
 // scan over all nodes. This matters: a linear scan is O(V²) on a chain graph where
 // every node errors, because propagateState is called recursively for each dependent.
+//
+// Note: propagateState uses a first-wins guard (!= NodePending) and does not enforce
+// Excluded > Blocked > Pending precedence. In diamond dependencies with mixed-state
+// parents, the child may receive whichever state propagates first. tryDispatch
+// re-evaluates all dependencies with full precedence before acting on any node.
+// No code path should read propagated state as authoritative.
 func (ps *PlanState) propagateState(dag *DAG, sourceID string, targetState NodeState) {
 	for _, depIdx := range dag.Dependents[sourceID] {
 		depID := dag.Nodes[depIdx].ID

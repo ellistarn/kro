@@ -55,13 +55,13 @@ func TestSetStatePropagateSplitExcludedBlocked(t *testing.T) {
 		assert.Equal(t, NodeBlocked, plan.States["c"], "transitive dependent should be Blocked")
 	})
 
-	t.Run("NodeDataPending propagates as NodeBlocked", func(t *testing.T) {
+	t.Run("NodeDataPending propagates as NodeDataPending", func(t *testing.T) {
 		plan := NewPlanState(dag)
 		plan.SetState(dag, "a", NodeDataPending)
 
 		assert.Equal(t, NodeDataPending, plan.States["a"])
-		assert.Equal(t, NodeBlocked, plan.States["b"])
-		assert.Equal(t, NodeBlocked, plan.States["c"])
+		assert.Equal(t, NodeDataPending, plan.States["b"])
+		assert.Equal(t, NodeDataPending, plan.States["c"])
 	})
 
 	t.Run("NodeConflict propagates as NodeBlocked", func(t *testing.T) {

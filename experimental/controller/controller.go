@@ -409,12 +409,14 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 			return
 		}
 
-		// Check dependencies. Two-pass scan to enforce Excluded > Blocked precedence.
-		// Per 004-graph-execution.md § Wind step 2: "Excluded takes precedence over
-		// Blocked: if a node has both, it is Excluded — the blocked dependency's
-		// resolution cannot make the node viable while the Excluded dependency is absent."
+		// Check dependencies. Per 004-graph-execution.md § Wind step 2:
+		// "Any dependency Excluded → Excluded. Any dependency in an error state
+		// (Conflict, Error, SystemError, or Blocked) → inherit Blocked. Any
+		// dependency Pending → inherit Pending. Precedence where multiple apply:
+		// Excluded > Blocked > Pending."
 		hasExcluded := false
 		hasBlocked := false
+		hasPending := false
 		hasInflight := false
 		for depID := range node.Dependencies {
 			depState, exists := plan.States[depID]
@@ -435,6 +437,9 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 						case NodeExcluded:
 							hasExcluded = true
 							continue
+						case NodeDataPending:
+							hasPending = true
+							continue
 						default:
 							hasBlocked = true
 							continue
@@ -445,18 +450,25 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 				hasInflight = true
 			case NodeExcluded:
 				hasExcluded = true
+			case NodeDataPending:
+				// Dependency data not yet available — this node inherits Pending.
+				hasPending = true
 			default:
-				// Blocked, DataPending, Error, SystemError, Conflict — uncertain absence
+				// Blocked, Error, SystemError, Conflict — dependency in error state.
 				hasBlocked = true
 			}
 		}
-		// Excluded takes precedence over Blocked (definitive > uncertain).
+		// Precedence: Excluded (definitive absence) > Blocked (error state) > Pending (data unavailable).
 		if hasExcluded {
 			plan.SetState(dag, node.ID, NodeExcluded)
 			return
 		}
 		if hasBlocked {
 			plan.SetState(dag, node.ID, NodeBlocked)
+			return
+		}
+		if hasPending {
+			plan.SetState(dag, node.ID, NodeDataPending)
 			return
 		}
 		if hasInflight {
@@ -475,6 +487,12 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 			}
 			if prevState, ok := state.previousPlanStates[node.ID]; ok {
 				plan.States[node.ID] = prevState
+			} else {
+				// Gated and never evaluated — data genuinely unavailable.
+				// Per 004-graph-execution.md § Wind step 3: "If never evaluated,
+				// the node remains Pending — dependents see a dependency that
+				// hasn't produced data and inherit Pending."
+				plan.States[node.ID] = NodeDataPending
 			}
 			// Dispatch dependents — this node retained previous state but
 			// dependents still need to be evaluated.
@@ -883,11 +901,16 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		}
 	}
 
-	// Retain previous keys for blocked nodes. Blocked nodes were never
+	// Retain previous keys for uncertain-absence nodes. These nodes were never
 	// dispatched to workers, so their keys aren't in appliedKeys yet.
-	// Without this, blocked resources would appear as prune candidates.
+	// Without this, their managed resources would appear as prune candidates.
+	// Per 004-graph-execution.md § Prune: "Pending and Blocked both represent
+	// uncertain absence — previous applied keys are retained, not safe to prune."
+	//
+	// Belt-and-suspenders: the prune gate also blocks on these states, but key
+	// retention is the surgical fallback if the gate logic ever changes.
 	for _, node := range dag.Nodes {
-		if plan.States[node.ID] == NodeBlocked {
+		if plan.States[node.ID] == NodeBlocked || plan.States[node.ID] == NodeDataPending {
 			if prevKeys, ok := state.previousKeys[node.ID]; ok {
 				appliedKeys = append(appliedKeys, prevKeys...)
 			}
@@ -910,7 +933,10 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	// produce the same diff — one mechanism.
 	pruneOK := true
 	prunePending := false
-	pruneSafe := !summary.HasDataPending && !summary.HasError && !summary.HasSystemError
+	// Per 004-graph-execution.md § Prune: "Uncertain absence (Pending, Blocked,
+	// Error, SystemError) blocks pruning — the resource might reappear once the
+	// blocker resolves."
+	pruneSafe := !summary.HasDataPending && !summary.HasBlocked && !summary.HasError && !summary.HasSystemError
 	if pruneSafe {
 		allPreviousKeys := map[string]bool{}
 		logger.V(1).Info("prune gate open", "previousAppliedKeys", len(state.previousAppliedKeys), "deferredPruneKeys", len(state.deferredPruneKeys), "superseded", len(supersededRevisions))
