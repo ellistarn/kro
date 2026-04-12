@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -494,4 +495,108 @@ func TestPruneSafetyConflictBlocksPrune(t *testing.T) {
 	assert.NoError(t, err,
 		"independent resource should NOT be pruned during Conflict state")
 	t.Log("Independent resource survived Conflict — prune safety proved")
+}
+
+// TestPruneSweptOnSpecNodeRemoval proves that removing nodes from the Graph
+// spec causes their managed resources to be pruned on the next reconcile.
+// This covers the case where the new revision has ZERO Owns nodes — triggered
+// is empty, but the prune phase must still run to clean up superseded resources.
+//
+// Design 004-graph-execution § Prune:
+//
+//	"After wind, diff the current key set against the applied set. Absent
+//	resources are prune candidates if their absence is definitive."
+//
+// A revision transition that removes all Owns nodes produces 0 triggered nodes
+// in the new revision. The controller must NOT return early before the prune
+// phase — otherwise resources from the superseded revision are orphaned.
+func TestPruneSweptOnSpecNodeRemoval(t *testing.T) {
+	t.Parallel()
+	ns := createNamespace(t)
+
+	cmGVK := schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"}
+
+	// 1. Create a Graph with two independent Owns nodes.
+	graph := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "experimental.kro.run/v1alpha1",
+			"kind":       "Graph",
+			"metadata": map[string]any{
+				"name":      "test-prune-sweep",
+				"namespace": ns,
+			},
+			"spec": map[string]any{
+				"nodes": []any{
+					map[string]any{
+						"id": "nodeA",
+						"template": map[string]any{
+							"apiVersion": "v1",
+							"kind":       "ConfigMap",
+							"metadata":   map[string]any{"name": "prune-sweep-a"},
+							"data":       map[string]any{"key": "a"},
+						},
+					},
+					map[string]any{
+						"id": "nodeB",
+						"template": map[string]any{
+							"apiVersion": "v1",
+							"kind":       "ConfigMap",
+							"metadata":   map[string]any{"name": "prune-sweep-b"},
+							"data":       map[string]any{"key": "b"},
+						},
+					},
+				},
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, graph))
+
+	// 2. Wait for both ConfigMaps to be created.
+	cmA := &unstructured.Unstructured{}
+	cmA.SetGroupVersionKind(cmGVK)
+	require.NoError(t, waitForResource(ctx, k8sClient,
+		types.NamespacedName{Name: "prune-sweep-a", Namespace: ns}, cmA))
+	cmB := &unstructured.Unstructured{}
+	cmB.SetGroupVersionKind(cmGVK)
+	require.NoError(t, waitForResource(ctx, k8sClient,
+		types.NamespacedName{Name: "prune-sweep-b", Namespace: ns}, cmB))
+	require.NoError(t, waitForGraphReady(ctx, k8sClient,
+		types.NamespacedName{Name: "test-prune-sweep", Namespace: ns}))
+	t.Log("Both ConfigMaps created, Graph Active")
+
+	// 3. Update the spec to have ZERO nodes. The new revision has no Owns
+	// nodes — triggered is empty, but the prune phase must still run.
+	// This is the exact scenario needsPruneSweep / isRevisionTransition
+	// guards are meant to handle.
+	latestGraph := &unstructured.Unstructured{}
+	latestGraph.SetGroupVersionKind(GraphGVK)
+	require.NoError(t, k8sClient.Get(ctx,
+		types.NamespacedName{Name: "test-prune-sweep", Namespace: ns}, latestGraph))
+	unstructured.SetNestedSlice(latestGraph.Object, []any{}, "spec", "nodes")
+	require.NoError(t, k8sClient.Update(ctx, latestGraph))
+	t.Log("Spec emptied — zero nodes in new revision")
+
+	// 4. THE KEY ASSERTION: both ConfigMaps must be pruned.
+	// If the controller returns early before the prune phase (len(triggered)==0
+	// early exit), these resources are orphaned and the test fails.
+	// Uses apierrors.IsNotFound to distinguish actual deletion from context
+	// cancellation — without it, a deadline would falsely satisfy err != nil.
+	require.NoError(t, wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 30*time.Second, true,
+		func(ctx context.Context) (bool, error) {
+			checkA := &unstructured.Unstructured{}
+			checkA.SetGroupVersionKind(cmGVK)
+			errA := k8sClient.Get(ctx, types.NamespacedName{Name: "prune-sweep-a", Namespace: ns}, checkA)
+			if errA != nil && !apierrors.IsNotFound(errA) {
+				return false, nil // transient error — keep polling
+			}
+			checkB := &unstructured.Unstructured{}
+			checkB.SetGroupVersionKind(cmGVK)
+			errB := k8sClient.Get(ctx, types.NamespacedName{Name: "prune-sweep-b", Namespace: ns}, checkB)
+			if errB != nil && !apierrors.IsNotFound(errB) {
+				return false, nil // transient error — keep polling
+			}
+			return apierrors.IsNotFound(errA) && apierrors.IsNotFound(errB), nil
+		}),
+		"both ConfigMaps must be pruned after all nodes are removed from spec")
+	t.Log("Both ConfigMaps pruned — spec-emptying triggers prune sweep")
 }

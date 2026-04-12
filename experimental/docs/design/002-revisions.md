@@ -127,21 +127,11 @@ Graph's finalizer holds removal until the controller completes a full unwind of 
 reverse dependency order. Once the finalizer clears and the Graph is removed, the API server
 cascading-deletes any remaining revisions.
 
-Revisions are freely deletable. They carry no finalizer — if a revision is manually deleted, the
-controller regenerates it from the current Graph spec on the next reconcile (triggered externally, as
-the controller does not watch revision objects for deletion events). This is safe because the applied
-set is derived from the watch cache, not from the revision object itself.
-
-The controller solves the cross-GVR transition problem — where a superseded revision managed a
-different resource type than the current one — through startup watch hydration rather than pinning
-revision objects in the API server. On startup, before any reconcile fires, the controller lists all
-existing GraphRevisions and starts an informer for every GVR referenced in any revision's node
-templates, using the same owner IDs as the normal reconcile path. This ensures the prune phase's
-watch cache source is populated on the first reconcile after a restart, regardless of whether a
-superseded revision still exists.
-
-The applied set — derived from the watch cache, not from revision status — is the authoritative
-record of what was written to the cluster.
+Revisions are derived artifacts. If manually deleted, the controller regenerates the active revision
+from the current Graph spec on the next reconcile. On startup, the controller hydrates watch caches
+from all existing revisions before any reconcile fires, so the applied set is accurate from the
+first post-restart reconcile. The applied set — derived from the watch cache, not the revision — is
+the authoritative record of what was written to the cluster.
 
 ## Why Not
 
