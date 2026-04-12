@@ -75,25 +75,9 @@ func TestRevisionRecoveryAfterManualDeletion(t *testing.T) {
 	require.NotEmpty(t, originalHash, "revision must have a content hash label")
 	t.Logf("Original revision: %s (hash=%s)", revName, originalHash)
 
-	// GraphRevisions carry a finalizer (experimental.kro.run/graph-controller)
-	// that is load-bearing for superseded revisions: it holds them in the API
-	// server so the prune phase can reconstruct applied-set keys for cross-GVR
-	// transitions after a controller restart.
-	//
-	// To manually delete a revision, remove the finalizer first. This test
-	// proves that after manual deletion the controller regenerates the revision
-	// from the current Graph spec on the next reconcile (triggered externally).
-	revForPatch := rev.DeepCopy()
-	filtered := revForPatch.GetFinalizers()[:0]
-	for _, f := range rev.GetFinalizers() {
-		if f != "experimental.kro.run/graph-controller" {
-			filtered = append(filtered, f)
-		}
-	}
-	revForPatch.SetFinalizers(filtered)
-	require.NoError(t, k8sClient.Update(ctx, revForPatch))
-	require.NoError(t, k8sClient.Delete(ctx, revForPatch))
-	t.Log("Finalizer removed and revision deleted")
+	// Revisions are freely deletable — no finalizer needed.
+	require.NoError(t, k8sClient.Delete(ctx, rev))
+	t.Log("Revision deleted")
 
 	// Wait for the revision to disappear.
 	require.NoError(t, wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 10*time.Second, true,
@@ -241,18 +225,8 @@ func TestRevisionContentHashDeduplication(t *testing.T) {
 	t.Logf("Gen2 revision hash: %s (different from gen1, as expected)", hash2)
 
 	// Delete gen2 revision and verify it regenerates with the SAME hash2.
-	// Must remove the finalizer first (revisions carry a finalizer to hold
-	// superseded revisions in the API server for cross-GVR prune reconstruction).
-	rev2ForPatch := rev2.DeepCopy()
-	filtered2 := rev2ForPatch.GetFinalizers()[:0]
-	for _, f := range rev2.GetFinalizers() {
-		if f != "experimental.kro.run/graph-controller" {
-			filtered2 = append(filtered2, f)
-		}
-	}
-	rev2ForPatch.SetFinalizers(filtered2)
-	require.NoError(t, k8sClient.Update(ctx, rev2ForPatch))
-	require.NoError(t, k8sClient.Delete(ctx, rev2ForPatch))
+	// Revisions are freely deletable — no finalizer removal needed.
+	require.NoError(t, k8sClient.Delete(ctx, rev2))
 
 	require.NoError(t, wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 10*time.Second, true,
 		func(ctx context.Context) (bool, error) {

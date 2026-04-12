@@ -127,20 +127,18 @@ Graph's finalizer holds removal until the controller completes a full unwind of 
 reverse dependency order. Once the finalizer clears and the Graph is removed, the API server
 cascading-deletes any remaining revisions.
 
-Revisions are derived artifacts. Each revision carries a finalizer
-(`experimental.kro.run/graph-controller`) that is load-bearing for superseded revisions: a
-superseded revision object is the long-term memory for cross-GVR transitions across controller
-restarts. After restart, the prune phase reconstructs the applied set from three sources — the watch
-cache, the in-memory keys from the previous reconcile, and static keys extracted from superseded
-revision specs. Without a superseded revision in the API server, resources of GVRs not present in
-the new revision are invisible to source (3) and may be orphaned. The finalizer holds a superseded
-revision until the controller has processed the transition and migrated the applied set.
+Revisions are freely deletable. They carry no finalizer — if a revision is manually deleted, the
+controller regenerates it from the current Graph spec on the next reconcile (triggered externally, as
+the controller does not watch revision objects for deletion events). This is safe because the applied
+set is derived from the watch cache, not from the revision object itself.
 
-To manually delete a revision, remove the finalizer first, then delete. If the active revision is
-deleted this way, the controller regenerates it from the current Graph spec on the next reconcile.
-The reconcile must be triggered externally — either by a spec change on the Graph, or by a watch
-event from a managed resource — because the controller does not watch revision objects for deletion
-events.
+The controller solves the cross-GVR transition problem — where a superseded revision managed a
+different resource type than the current one — through startup watch hydration rather than pinning
+revision objects in the API server. On startup, before any reconcile fires, the controller lists all
+existing GraphRevisions and starts an informer for every GVR referenced in any revision's node
+templates, using the same owner IDs as the normal reconcile path. This ensures the prune phase's
+watch cache source is populated on the first reconcile after a restart, regardless of whether a
+superseded revision still exists.
 
 The applied set — derived from the watch cache, not from revision status — is the authoritative
 record of what was written to the cluster.
