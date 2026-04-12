@@ -166,16 +166,24 @@ hash (step 7) skips downstream evaluation.
 
 Each node's evaluation resolves to exactly one state:
 
-| State       | Meaning                        | Dependents | Resolution                |
-|-------------|--------------------------------|------------|---------------------------|
-| Ready       | Applied, readyWhen satisfied   | Proceed    | —                         |
-| NotReady    | Applied, readyWhen unsatisfied | Proceed    | Converges via watch       |
-| Pending     | Data not yet available         | Blocked    | Upstream resolves         |
-| Excluded    | includeWhen false              | Excluded   | includeWhen inputs change |
-| Blocked     | Dependency in error state      | Blocked    | Dependency resolves       |
-| Conflict    | Field ownership contested      | Blocked    | Propagation, revision, or drift timer |
-| Error       | Client request failed (4xx)    | Blocked    | Propagation, revision, or drift timer |
-| SystemError | Server/infra failure (5xx)     | Blocked    | Backoff retry, then drift timer  |
+| State         | Meaning                            | Dependents | Resolution                |
+|---------------|------------------------------------|------------|---------------------------|
+| Ready         | Applied, readyWhen satisfied       | Proceed    | —                         |
+| NotReady      | Applied, readyWhen unsatisfied     | Proceed    | Converges via watch       |
+| Unprocessed   | Not yet visited in this walk       | Blocked    | Walk reaches node         |
+| DataPending   | CEL expression couldn't resolve    | Blocked    | Upstream populates field  |
+| Excluded      | includeWhen false                  | Excluded   | includeWhen inputs change |
+| Blocked       | Dependency in error state          | Blocked    | Dependency resolves       |
+| Conflict      | Field ownership contested          | Blocked    | Propagation, revision, or drift timer |
+| Error         | Client request failed (4xx)        | Blocked    | Propagation, revision, or drift timer |
+| SystemError   | Server/infra failure (5xx)         | Blocked    | Backoff retry, then drift timer  |
+
+Unprocessed is a walk-transient state — the node hasn't been visited yet in the current topological
+walk. It resolves within the same reconcile as the walk progresses. DataPending means the node was
+evaluated but a CEL expression referenced a field that does not exist on the upstream object (e.g., a
+status field the upstream controller has not yet written). DataPending resolves when the upstream
+object's data changes (typically a watch event after the upstream controller writes the field). Both
+surface as `Pending` in the Graph's Ready condition — to operators, the distinction is internal.
 
 Ready and NotReady are both "applied and in scope." readyWhen is a health signal — it does not gate
 dependents. Blocked states propagate as Blocked (uncertain absence — previous applied keys retained,

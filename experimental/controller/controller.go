@@ -272,7 +272,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	inflight := 0
 	// dispatched guards against double-dispatch: when a node has multiple
 	// parents that complete, each parent's completion calls tryDispatch on
-	// shared dependents. Without this guard the second call sees NodePending
+	// shared dependents. Without this guard the second call sees NodeUnprocessed
 	// (state hasn't changed yet) and spawns a duplicate goroutine — two
 	// goroutines writing to the same maps causes concurrent-map-writes panic.
 	// Coordinator-local (single-threaded), no synchronization needed.
@@ -281,7 +281,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	// reconcile (via the skip path) but whose dispatch eligibility remains
 	// open. This separates "outputs available" from "evaluation complete."
 	// A skipped node makes its outputs available so dependents can check
-	// dependencies, but stays NodePending so a propagation trigger can
+	// dependencies, but stays NodeUnprocessed so a propagation trigger can
 	// reclaim it for re-evaluation later in the same walk.
 	outputsReady := make(map[string]bool, len(dag.Nodes))
 	var nodeErrors []string // "nodeID: reason" for status reporting
@@ -295,7 +295,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	tryDispatch = func(idx int) {
 		node := &dag.Nodes[idx]
 
-		if plan.States[node.ID] != NodePending {
+		if plan.States[node.ID] != NodeUnprocessed {
 			return // already processed or excluded
 		}
 		if dispatched[idx] {
@@ -313,11 +313,11 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		// Per 004-graph-execution.md § Wind step 1: retain previous evaluation.
 		//
 		// Carry forward previous outputs (scope, keys, propagateWhen) so
-		// dependents can read them, but leave plan.States as NodePending.
+		// dependents can read them, but leave plan.States as NodeUnprocessed.
 		// This keeps the node dispatch-eligible: if a propagation trigger
 		// arrives later in this walk (upstream output changed), tryDispatch
 		// can reclaim the node for re-evaluation. Setting NodeReady here
-		// would block re-dispatch — tryDispatch returns early for non-Pending.
+		// would block re-dispatch — tryDispatch returns early for non-Unprocessed.
 		if !triggered[node.ID] && !propagationTriggered[node.ID] {
 			if prev, ok := state.previousScope[node.ID]; ok {
 				eval.scope[node.ID] = prev
@@ -365,7 +365,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 			switch depState {
 			case NodeReady, NodeNotReady:
 				continue // resolved, good
-			case NodePending:
+			case NodeUnprocessed:
 				// Dependency still inflight — unless its outputs are ready
 				// from the skip path (previous reconcile's state carried forward).
 				if outputsReady[depID] {
@@ -813,11 +813,11 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	}
 
 	// Finalize skipped nodes: nodes that were skipped (outputsReady) and never
-	// re-dispatched via propagation trigger still have plan.States = Pending.
+	// re-dispatched via propagation trigger still have plan.States = Unprocessed.
 	// Restore their previous state for the plan summary (status reporting).
 	walkAttempted = true
 	for nodeID := range outputsReady {
-		if plan.States[nodeID] == NodePending {
+		if plan.States[nodeID] == NodeUnprocessed {
 			if prevState, ok := state.previousPlanStates[nodeID]; ok {
 				plan.States[nodeID] = prevState
 			}

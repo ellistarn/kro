@@ -212,7 +212,7 @@ func ScopeFromTriggers(dag *DAG, triggerNodes map[string]bool) map[string]bool {
 type NodeState int
 
 const (
-	NodePending     NodeState = iota // Not yet processed
+	NodeUnprocessed NodeState = iota // Not yet visited in this walk
 	NodeReady                        // Applied and readyWhen satisfied
 	NodeNotReady                     // Applied but readyWhen not satisfied
 	NodeExcluded                     // Definitive absence: excluded by includeWhen evaluating to false
@@ -227,8 +227,8 @@ const (
 // Per 006-quality.md: "Each concept has exactly one name, used consistently."
 func (s NodeState) String() string {
 	switch s {
-	case NodePending:
-		return "Pending"
+	case NodeUnprocessed:
+		return "Unprocessed"
 	case NodeReady:
 		return "Ready"
 	case NodeNotReady:
@@ -266,7 +266,7 @@ func NewPlanState(dag *DAG) *PlanState {
 		PropagateReady: make(map[string]bool, len(dag.Nodes)),
 	}
 	for _, node := range dag.Nodes {
-		ps.States[node.ID] = NodePending
+		ps.States[node.ID] = NodeUnprocessed
 		// Nodes without propagateWhen propagate immediately.
 		ps.PropagateReady[node.ID] = len(node.PropagateWhen) == 0
 	}
@@ -308,7 +308,7 @@ func (ps *PlanState) SetState(dag *DAG, id string, state NodeState) {
 // propagateState marks all downstream dependents of a node with the target state.
 func (ps *PlanState) propagateState(dag *DAG, sourceID string, targetState NodeState) {
 	for _, node := range dag.Nodes {
-		if ps.States[node.ID] != NodePending {
+		if ps.States[node.ID] != NodeUnprocessed {
 			continue // already processed
 		}
 		if node.Dependencies[sourceID] {

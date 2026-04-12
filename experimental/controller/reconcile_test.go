@@ -87,8 +87,8 @@ func TestSetStatePropagateSplitExcludedBlocked(t *testing.T) {
 		plan.SetState(dag, "a", NodeReady)
 
 		assert.Equal(t, NodeReady, plan.States["a"])
-		assert.Equal(t, NodePending, plan.States["b"], "Ready should not propagate")
-		assert.Equal(t, NodePending, plan.States["c"])
+		assert.Equal(t, NodeUnprocessed, plan.States["b"], "Ready should not propagate")
+		assert.Equal(t, NodeUnprocessed, plan.States["c"])
 	})
 
 	t.Run("NodeNotReady does not propagate", func(t *testing.T) {
@@ -96,8 +96,8 @@ func TestSetStatePropagateSplitExcludedBlocked(t *testing.T) {
 		plan.SetState(dag, "a", NodeNotReady)
 
 		assert.Equal(t, NodeNotReady, plan.States["a"])
-		assert.Equal(t, NodePending, plan.States["b"], "NotReady should not propagate")
-		assert.Equal(t, NodePending, plan.States["c"])
+		assert.Equal(t, NodeUnprocessed, plan.States["b"], "NotReady should not propagate")
+		assert.Equal(t, NodeUnprocessed, plan.States["c"])
 	})
 }
 
@@ -314,7 +314,7 @@ func TestNodeStateString(t *testing.T) {
 		state NodeState
 		want  string
 	}{
-		{NodePending, "Pending"},
+		{NodeUnprocessed, "Unprocessed"},
 		{NodeReady, "Ready"},
 		{NodeNotReady, "NotReady"},
 		{NodeExcluded, "Excluded"},
