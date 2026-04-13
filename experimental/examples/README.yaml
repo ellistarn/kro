@@ -58,11 +58,14 @@
 #     to an OpenAPI v3 schema. Delegates to the existing Go implementation.
 #
 # Examples:
-#   1-graph.yaml           — A simple Graph (bundle of resources)
-#   2-graph-kind.yaml      — A Graph that implements a Kind (what an RGD compiles to)
-#   3-graph-rgd.yaml       — A Graph that implements the full RGD system
-#   4-webapp.yaml          — A WebApp instance (input to examples 2 and 3)
-#   5-rgd.yaml             — An RGD definition (input to example 3)
+#   1-graph.yaml            — A simple Graph (bundle of resources)
+#   2-graph-kind.yaml       — A Graph that implements a Kind (what a GraphDefinition compiles to)
+#   3-webapp.yaml           — A WebApp instance (input to examples 2, 4, and 5)
+#   4-graph-definition.yaml — A GraphDefinition with versioned schemas and nodes
+#
+# Compat:
+#   5-rgd.yaml              — A ResourceGraphDefinition (existing kro API)
+#   6-graph-rgd.yaml        — A Graph that implements the full ResourceGraphDefinition system
 #
 # Verify with the poc:
 #   go run ./docs/design/graph/poc docs/design/graph/examples/*.yaml

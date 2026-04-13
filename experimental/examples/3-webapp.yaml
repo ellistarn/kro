@@ -1,0 +1,14 @@
+# 3. A WebApp instance
+#
+# What a user creates after example 2 is running. The WebApp controller
+# (example 2), the GraphDefinition system (example 4), or the
+# ResourceGraphDefinition system (example 6) watches these and reconciles.
+apiVersion: experimental.kro.run/v1alpha1
+kind: WebApp
+metadata:
+  name: my-webapp
+  namespace: default
+spec:
+  image: nginx:latest
+  replicas: 3
+  port: 80

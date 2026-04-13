@@ -1,0 +1,115 @@
+# 4. A GraphDefinition
+#
+# Defines the WebApp CRD and implements it with a graph.
+# Like ResourceGraphDefinition but with multi-version support.
+# Each version has its own schema and nodes.
+#
+# This example shows two versions:
+#   v1alpha1 — image, replicas, port
+#   v1beta1  — adds healthCheckPath with livenessProbe, endpoint status
+#
+# Defaults:
+#   served defaults to true, storage defaults to the last version.
+#   With one version, you don't need to think about either.
+#
+# Versioning:
+#   - Both versions served simultaneously (None conversion)
+#   - Per-version CRD schemas prevent mixed state at admission
+#   - Users migrate by updating their manifest's apiVersion in Git
+#   - Version change swaps the node set → Graph Revision handles the diff
+#
+# See 005-graph-definition.md for the full design.
+# ---------------------------------------------------------------------------
+apiVersion: experimental.kro.run/v1alpha1
+kind: GraphDefinition
+metadata:
+  name: webapp
+spec:
+  kind: WebApp
+  group: experimental.kro.run
+  versions:
+    - name: v1alpha1
+      schema:
+        spec:
+          image: string | default=nginx
+          replicas: integer | default=1
+          port: integer | default=80
+        status:
+          deploymentReady: ${deployment.status.availableReplicas == deployment.spec.replicas}
+      nodes:
+        - id: deployment
+          template:
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: ${schema.metadata.name}
+            spec:
+              replicas: ${schema.spec.replicas}
+              selector:
+                matchLabels:
+                  app: ${schema.metadata.name}
+              template:
+                metadata:
+                  labels:
+                    app: ${schema.metadata.name}
+                spec:
+                  containers:
+                    - name: app
+                      image: ${schema.spec.image}
+        - id: service
+          template:
+            apiVersion: v1
+            kind: Service
+            metadata:
+              name: ${schema.metadata.name}-svc
+            spec:
+              selector:
+                app: ${schema.metadata.name}
+              ports:
+                - port: ${schema.spec.port}
+
+    - name: v1beta1
+      schema:
+        spec:
+          image: string | default=nginx
+          replicas: integer | default=1
+          port: integer | default=80
+          healthCheckPath: string | default=/healthz
+        status:
+          deploymentReady: ${deployment.status.availableReplicas == deployment.spec.replicas}
+          endpoint: ${service.status.loadBalancer.ingress[0].hostname}
+      nodes:
+        - id: deployment
+          template:
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: ${schema.metadata.name}
+            spec:
+              replicas: ${schema.spec.replicas}
+              selector:
+                matchLabels:
+                  app: ${schema.metadata.name}
+              template:
+                metadata:
+                  labels:
+                    app: ${schema.metadata.name}
+                spec:
+                  containers:
+                    - name: app
+                      image: ${schema.spec.image}
+                      livenessProbe:
+                        httpGet:
+                          path: ${schema.spec.healthCheckPath}
+                          port: ${schema.spec.port}
+        - id: service
+          template:
+            apiVersion: v1
+            kind: Service
+            metadata:
+              name: ${schema.metadata.name}-svc
+            spec:
+              selector:
+                app: ${schema.metadata.name}
+              ports:
+                - port: ${schema.spec.port}

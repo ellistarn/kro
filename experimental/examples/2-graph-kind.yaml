@@ -1,7 +1,8 @@
 # 2. A Graph that implements a Kind
 #
-# This is what a single RGD compiles down to. Given an RGD that defines a
-# "WebApp" kind with a Deployment and Service, this is the equivalent Graph.
+# This is what a single GraphDefinition compiles down to. Given a
+# GraphDefinition that defines a "WebApp" kind with a Deployment and
+# Service, this is the equivalent Graph.
 # It watches all WebApp instances and creates a scoped Graph per instance.
 # Each inner Graph owns its resources and contributes status back to the instance.
 # ---------------------------------------------------------------------------

@@ -1,8 +1,12 @@
-# 5. A ResourceGraphDefinition that defines the WebApp kind
+# 5. A ResourceGraphDefinition (kro compat)
 #
-# What a platform engineer creates to define the WebApp abstraction.
-# Example 3's RGD system watches these and creates a controller Graph per RGD.
-# The per-instance controller evaluates the expressions in spec.resources.
+# The existing kro API. What a platform engineer creates in upstream kro
+# today. Example 6's ResourceGraphDefinition system watches these and
+# creates a controller Graph per ResourceGraphDefinition.
+#
+# GraphDefinition (example 4) is the experimental successor — same
+# concepts, with multi-version CRD support and cleaner separation of
+# schema versioning from node composition.
 apiVersion: experimental.kro.run/v1alpha1
 kind: ResourceGraphDefinition
 metadata:

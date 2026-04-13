@@ -1,10 +1,11 @@
-# 3. A Graph that implements ResourceGraphDefinition
+# 6. A Graph that implements ResourceGraphDefinition
 #
-# This implements the full RGD system. It creates the RGD CRD, watches all
-# RGDs, and creates example 2 for each one (along with its CRD).
+# This implements the full ResourceGraphDefinition system. It creates the
+# ResourceGraphDefinition CRD, watches all ResourceGraphDefinitions, and
+# creates example 2 for each one (along with its CRD).
 # Each level is its own scope:
 #
-#   rgd-implementation (L0)           — creates the RGD CRD, watches all RGDs
+#   rgd-implementation (L0)           — creates the ResourceGraphDefinition CRD, watches all definitions
 #   └─ <rgd-name> (L1)               — creates the kind CRD, watches instances
 #      └─ <instance>-<kind> (L2)     — owns resources, contributes status
 #
