@@ -778,3 +778,101 @@ func TestIdempotentReReconcileZeroWrites(t *testing.T) {
 	}
 	t.Log("All managed resources have stable resourceVersions — idempotent re-reconcile proved")
 }
+
+// TestDriftTimerCorrectsMutatedResource verifies that when a managed resource
+// is externally mutated (e.g., by kubectl edit), the drift timer fires and
+// corrects the resource back to the Graph's desired state.
+//
+// This tests the fix for the drift bypass bug: drift-triggered nodes must
+// bypass both the evaluation-hash check (step 4) and the apply-hash check
+// (step 6). Without the fix, drift-triggered nodes with unchanged inputs
+// would skip template evaluation and apply unconditionally, leaving
+// server-side drift uncorrected indefinitely.
+//
+// Per 004-graph-execution.md § The Walk: "The drift timer bypasses the
+// evaluation-hash check (step 4) and the apply-hash check (step 6) — evaluate
+// the template and apply unconditionally."
+func TestDriftTimerCorrectsMutatedResource(t *testing.T) {
+	t.Parallel()
+	ns := createNamespace(t)
+
+	// 1. Create a Graph with a single ConfigMap.
+	graph := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "experimental.kro.run/v1alpha1",
+			"kind":       "Graph",
+			"metadata": map[string]any{
+				"name":      "test-drift-correction",
+				"namespace": ns,
+			},
+			"spec": map[string]any{
+				"nodes": []any{
+					map[string]any{
+						"id": "cm",
+						"template": map[string]any{
+							"apiVersion": "v1",
+							"kind":       "ConfigMap",
+							"metadata":   map[string]any{"name": "drift-target"},
+							"data": map[string]any{
+								"desired": "original",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, graph))
+
+	// 2. Wait for convergence.
+	require.NoError(t, waitForGraphReady(ctx, k8sClient,
+		types.NamespacedName{Name: "test-drift-correction", Namespace: ns}))
+	require.NoError(t, waitForSettle(ctx, k8sClient, GraphGVK,
+		types.NamespacedName{Name: "test-drift-correction", Namespace: ns}))
+
+	// 3. Verify the ConfigMap has the expected value.
+	cm := &unstructured.Unstructured{}
+	cm.SetGroupVersionKind(cmGVK)
+	require.NoError(t, k8sClient.Get(ctx,
+		types.NamespacedName{Name: "drift-target", Namespace: ns}, cm))
+	data, _, _ := unstructured.NestedStringMap(cm.Object, "data")
+	require.Equal(t, "original", data["desired"])
+	t.Log("ConfigMap created with desired value")
+
+	// 4. Externally mutate the ConfigMap's data field. Use a raw update
+	// (not SSA) to simulate kubectl edit or another controller modifying
+	// the resource. This changes the live state without changing the
+	// Graph's desired state.
+	cm.Object["data"] = map[string]any{"desired": "drifted"}
+	require.NoError(t, k8sClient.Update(ctx, cm))
+	t.Log("externally mutated ConfigMap: desired=drifted")
+
+	// Verify the mutation took effect.
+	mutated := &unstructured.Unstructured{}
+	mutated.SetGroupVersionKind(cmGVK)
+	require.NoError(t, k8sClient.Get(ctx,
+		types.NamespacedName{Name: "drift-target", Namespace: ns}, mutated))
+	mutatedData, _, _ := unstructured.NestedStringMap(mutated.Object, "data")
+	require.Equal(t, "drifted", mutatedData["desired"], "mutation should take effect")
+
+	// 5. Wait for the drift timer to fire and correct the resource.
+	// The test binary runs with --drift-interval=2s, so the drift timer
+	// fires within ~2-7s (interval + jitter). Use a generous timeout.
+	require.NoError(t, wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, 30*time.Second, true, func(ctx2 context.Context) (bool, error) {
+		check := &unstructured.Unstructured{}
+		check.SetGroupVersionKind(cmGVK)
+		if err := k8sClient.Get(ctx2, types.NamespacedName{Name: "drift-target", Namespace: ns}, check); err != nil {
+			return false, nil
+		}
+		d, _, _ := unstructured.NestedStringMap(check.Object, "data")
+		return d["desired"] == "original", nil
+	}))
+	t.Log("drift corrected — ConfigMap restored to desired=original")
+
+	// 6. Verify the Graph is still Ready.
+	g := &unstructured.Unstructured{}
+	g.SetGroupVersionKind(GraphGVK)
+	require.NoError(t, k8sClient.Get(ctx,
+		types.NamespacedName{Name: "test-drift-correction", Namespace: ns}, g))
+	assert.True(t, graphReady(g), "Graph should remain Ready after drift correction")
+}

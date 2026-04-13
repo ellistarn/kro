@@ -13,9 +13,10 @@ import "github.com/prometheus/client_golang/prometheus"
 var (
 	// DriftTimerFiresTotal counts drift timer expirations that trigger an
 	// unconditional apply. Incremented in the trigger determination block
-	// when a per-node drift timer expires and bypasses the template-hash
-	// check. Per 004-graph-execution.md: "the drift timer bypasses the
-	// template-hash check — apply unconditionally."
+	// when a per-node drift timer expires and bypasses the evaluation-hash and
+	// apply-hash checks. Per 004-graph-execution.md: "the drift timer
+	// bypasses the evaluation-hash check (step 4) and the apply-hash check
+	// (step 6) — evaluate the template and apply unconditionally."
 	DriftTimerFiresTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "graph_drift_timer_fires_total",

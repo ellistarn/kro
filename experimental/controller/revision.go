@@ -209,7 +209,7 @@ func injectNodeLabels(tmpl map[string]any, graphName, graphNamespace, generation
 	if anns == nil {
 		anns = map[string]any{}
 	}
-	anns[templateHashAnnotation] = hash
+	anns[applyHashAnnotation] = hash
 	md["annotations"] = anns
 }
 

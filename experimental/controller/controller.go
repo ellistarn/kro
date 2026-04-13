@@ -100,6 +100,47 @@ type GraphReconciler struct {
 	Watcher   *WatchCoordinator // nil = no dynamic watches (backward compat with existing tests)
 	Caches    *graphCaches      // per-revision compiled expression caches
 	Resources *resourceCache    // per-resource full object cache
+
+	// DriftInterval overrides the per-node drift timer interval.
+	// Zero uses the default (30 minutes). Per 004-graph-execution.md § The Walk.
+	DriftInterval time.Duration
+}
+
+// driftInterval returns the configured drift interval, or the default.
+func (r *GraphReconciler) driftInterval() time.Duration {
+	if r.DriftInterval > 0 {
+		return r.DriftInterval
+	}
+	return defaultDriftInterval
+}
+
+// invalidateResourceCache removes the resource cache entry for a node's
+// managed resource. This forces applyResource to re-apply on the next
+// evaluation (apply-hash cache miss). Used by drift timer expiry to
+// bypass the apply-hash check without threading a parameter through
+// every function in the apply chain.
+func (r *GraphReconciler) invalidateResourceCache(state *instanceState, nodeID string) {
+	prev, ok := state.previousScope[nodeID]
+	if !ok {
+		return
+	}
+	prevMap, ok := prev.(map[string]any)
+	if !ok {
+		return
+	}
+	apiVersion, _ := prevMap["apiVersion"].(string)
+	kind, _ := prevMap["kind"].(string)
+	md, _ := prevMap["metadata"].(map[string]any)
+	if md == nil || apiVersion == "" || kind == "" {
+		return
+	}
+	ns, _ := md["namespace"].(string)
+	name, _ := md["name"].(string)
+	if name == "" {
+		return
+	}
+	cacheKey := resourceCacheKey(apiVersion, kind, ns, name)
+	r.Resources.remove(cacheKey)
 }
 
 func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, reconcileErr error) {
@@ -244,9 +285,19 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		// Drift timer triggers: nodes whose consistency timer expired.
 		// Per 004-graph-execution.md § The Walk: "Each node has an
 		// in-memory drift timer with a jittered interval."
+		//
+		// Drift bypasses evaluation-hash and apply-hash checks by clearing
+		// the cached hashes — no previous hash means no match, forcing
+		// full template evaluation and unconditional apply. This is cache
+		// invalidation, not control flow: applyResource and every function
+		// in the chain works unchanged.
 		for _, node := range dag.Nodes {
 			if state.isDriftExpired(node.ID) {
 				triggered[node.ID] = true
+				// Clear evaluation hash → forces template evaluation (step 4 bypass).
+				delete(state.previousEvalHashes, node.ID)
+				// Clear resource cache → forces apply (step 6 bypass).
+				r.invalidateResourceCache(state, node.ID)
 				DriftTimerFiresTotal.With(graphMetricLabels(
 					graph.GetName(), graph.GetNamespace(), node.ID,
 				)).Inc()
@@ -267,7 +318,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 			triggered[node.ID] = true
 		}
 	}
-	// Propagation triggers are set during the walk (step 7) when a node's
+	// Propagation triggers are set during the walk (step 8) when a node's
 	// propagation hash changes. Tracked in propagationTriggered below.
 	propagationTriggered := make(map[string]bool)
 
@@ -502,7 +553,8 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 			return
 		}
 
-		// Step 3: Change check — section-scoped input hashing.
+		// Step 4: Evaluation check — section-scoped evaluation hashing.
+		// Per 004-graph-execution.md § Wind step 4.
 		// Hash the node's dependency inputs (only referenced sections) and
 		// compare against the previous reconcile's hash. Three outcomes:
 		//
@@ -513,16 +565,16 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		//    readyWhen/propagateWhen only
 		// 3. Dependency hash mismatch → full evaluation (dispatch to worker)
 		//
-		// Watch and CollectionWatch nodes are excluded from input hashing
+		// Watch and CollectionWatch nodes are excluded from evaluation hashing
 		// because their output is determined by cluster state (GET/List),
 		// not by scope data. A Watch node's dependency inputs can be unchanged
 		// while a new resource was created in the cluster.
 		nodeRef := node.Reference()
 		canHashSkip := nodeRef != ReferenceWatch && nodeRef != ReferenceWatchKind
 		if canHashSkip {
-			if _, hasPrevHash := state.previousInputHashes[node.ID]; hasPrevHash {
-				inputHash, hashErr := hashNodeInputs(node, eval.scope)
-				if hashErr == nil && inputHash != "" && inputHash == state.previousInputHashes[node.ID] {
+			if _, hasPrevHash := state.previousEvalHashes[node.ID]; hasPrevHash {
+				evalHash, hashErr := hashNodeInputs(node, eval.scope)
+				if hashErr == nil && evalHash != "" && evalHash == state.previousEvalHashes[node.ID] {
 					// Dependency inputs unchanged. Check self-state and
 					// gate function deps (e.g., dep.ready()).
 					prevScope := state.previousScope[node.ID]
@@ -562,7 +614,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 
 					if !selfChanged && !readinessDepChanged {
 						// Path 1: dependency hash match + self unchanged → skip everything.
-						logger.V(1).Info("input hash match — skipping evaluation",
+						logger.V(1).Info("evaluation hash match — skipping evaluation",
 							"node", node.ID)
 						if prev, ok := state.previousScope[node.ID]; ok {
 							eval.scope[node.ID] = prev
@@ -778,7 +830,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 			if state.resolvedReferences[node.ID] == ReferenceContribute &&
 				state.previousPlanStates[node.ID] == NodeConflict {
 				state.resolvedReferences[node.ID] = ReferenceUnresolved
-				delete(state.previousInputHashes, node.ID)
+				delete(state.previousEvalHashes, node.ID)
 			}
 			state.previousPlanStates[node.ID] = NodePending
 			state.previousScope[node.ID] = res.scopeValue
@@ -874,13 +926,13 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		state.previousKeys[node.ID] = res.keys
 		state.previousPlanStates[node.ID] = res.state
 
-		// Store input hash for next reconcile's change check (step 3).
+		// Store evaluation hash for next reconcile's change check (step 4).
 		// This enables the content-addressed skip: if dependency inputs
 		// haven't changed, template evaluation is deterministic and the
 		// write can be skipped. Without this, every triggered node does
 		// a full apply cycle including re-creating externally deleted resources.
-		if inputHash, err := hashNodeInputs(node, eval.scope); err == nil && inputHash != "" {
-			state.previousInputHashes[node.ID] = inputHash
+		if evalHash, err := hashNodeInputs(node, eval.scope); err == nil && evalHash != "" {
+			state.previousEvalHashes[node.ID] = evalHash
 		}
 
 		// Check dependents: dispatch any whose dependencies are now satisfied.
@@ -1079,7 +1131,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		nodeState := plan.States[node.ID]
 		switch nodeState {
 		case NodeReady, NodeNotReady:
-			state.resetDriftTimer(node.ID, defaultDriftInterval, maxDriftJitter)
+			state.resetDriftTimer(node.ID, r.driftInterval(), maxDriftJitter)
 		case NodePending:
 			state.resetDriftTimer(node.ID, 1*time.Second, 0)
 		case NodeSystemError:
@@ -1280,8 +1332,8 @@ func (r *GraphReconciler) reconcileDelete(ctx context.Context, graph *unstructur
 			continue // already gone
 		}
 		objAnnotations := obj.GetAnnotations()
-		if objAnnotations == nil || objAnnotations[templateHashAnnotation] == "" {
-			logger.V(1).Info("skipping delete for resource without template hash (never successfully applied)", "key", key)
+		if objAnnotations == nil || objAnnotations[applyHashAnnotation] == "" {
+			logger.V(1).Info("skipping delete for resource without apply hash (never successfully applied)", "key", key)
 			continue
 		}
 
@@ -1373,7 +1425,7 @@ func (r *GraphReconciler) reconcileDelete(ctx context.Context, graph *unstructur
 	}
 
 	// Pass 2: Verify managed resources that we actually deleted are gone.
-	// Only check resources that had our template hash — others (e.g., conflicted
+	// Only check resources that had our apply hash — others (e.g., conflicted
 	// resources that were never successfully applied) are not our responsibility.
 	for key := range deletedKeys {
 		gvk, nn := parseResourceKey(key)
@@ -1532,7 +1584,7 @@ func hydrateWatchCachesFromRevisions(restConfig *rest.Config, watchMgr *WatchMan
 //
 // Returns a shutdown function that stops the watch manager. The caller
 // must invoke this on teardown.
-func SetupWithManager(mgr ctrl.Manager, restConfig *rest.Config, maxWorkers int) (shutdown func(), err error) {
+func SetupWithManager(mgr ctrl.Manager, restConfig *rest.Config, maxWorkers int, driftInterval time.Duration) (shutdown func(), err error) {
 	RegisterMetrics(crmetrics.Registry)
 
 	if maxWorkers <= 0 {
@@ -1556,10 +1608,11 @@ func SetupWithManager(mgr ctrl.Manager, restConfig *rest.Config, maxWorkers int)
 	watchMgr.onEvent = coordinator.routeEvent
 
 	reconciler := &GraphReconciler{
-		Client:    mgr.GetClient(),
-		Watcher:   coordinator,
-		Caches:    newGraphCaches(),
-		Resources: newResourceCache(),
+		Client:        mgr.GetClient(),
+		Watcher:       coordinator,
+		Caches:        newGraphCaches(),
+		Resources:     newResourceCache(),
+		DriftInterval: driftInterval,
 	}
 
 	// Pre-populate watch informers from existing GraphRevisions before the

@@ -459,14 +459,14 @@ func (r *GraphReconciler) applyResource(ctx context.Context, graph *unstructured
 
 	// Content-addressed apply: hash the desired state to detect changes.
 	// The hash is computed before adding the hash annotation itself.
-	templateHash, err := hashDesiredState(obj.Object)
+	applyHash, err := hashDesiredState(obj.Object)
 	if err != nil {
 		return nil, fmt.Errorf("hashing template for %s: %w", obj.GetName(), err)
 	}
 	cacheKey := resourceCacheKey(obj.GetAPIVersion(), obj.GetKind(), obj.GetNamespace(), obj.GetName())
 
 	// Check the resource cache + metadata informer for change detection.
-	if cached, ok := r.Resources.get(cacheKey); ok && cached.templateHash == templateHash {
+	if cached, ok := r.Resources.get(cacheKey); ok && cached.applyHash == applyHash {
 		// Our desired state hasn't changed. Check if the live object has changed
 		// (e.g., status updated by another controller) via the metadata informer.
 		if watcher != nil {
@@ -496,19 +496,19 @@ func (r *GraphReconciler) applyResource(ctx context.Context, graph *unstructured
 			// Update the cache with fresh data
 			r.Resources.set(cacheKey, &cachedObject{
 				resourceVersion: readBack.GetResourceVersion(),
-				templateHash:    templateHash,
+				applyHash:       applyHash,
 				object:          readBack.Object,
 			})
 			return readBack, nil
 		}
 	}
 
-	// Set the template hash annotation for future comparisons.
+	// Set the apply hash annotation for future comparisons.
 	annotations := obj.GetAnnotations()
 	if annotations == nil {
 		annotations = map[string]string{}
 	}
-	annotations[templateHashAnnotation] = templateHash
+	annotations[applyHashAnnotation] = applyHash
 	obj.SetAnnotations(annotations)
 
 	forceApply := isForceApply(obj)
@@ -591,9 +591,9 @@ func (r *GraphReconciler) applyResource(ctx context.Context, graph *unstructured
 			statusOpts = append(statusOpts, client.ForceOwnership)
 		}
 		if err := r.Client.Status().Patch(ctx, statusTarget, client.RawPatch(types.ApplyPatchType, sData), statusOpts...); err != nil {
-			// Revert the cached template hash so the next reconcile retries both.
+			// Revert the cached apply hash so the next reconcile retries both.
 			// Per 004-graph-execution.md: "If the status subresource apply fails,
-			// the controller reverts the in-memory template-hash."
+			// the controller reverts the in-memory apply-hash."
 			r.Resources.remove(cacheKey)
 			if apierrors.IsConflict(err) {
 				return nil, fmt.Errorf("SSA status conflict on %s/%s %s: %w: %w", obj.GetAPIVersion(), obj.GetKind(), obj.GetName(), ErrFieldConflict, err)
@@ -612,7 +612,7 @@ func (r *GraphReconciler) applyResource(ctx context.Context, graph *unstructured
 	// Populate the resource cache.
 	r.Resources.set(cacheKey, &cachedObject{
 		resourceVersion: readBack.GetResourceVersion(),
-		templateHash:    templateHash,
+		applyHash:       applyHash,
 		object:          readBack.Object,
 	})
 
@@ -658,14 +658,14 @@ func (r *GraphReconciler) applyContribution(ctx context.Context, graph *unstruct
 	}
 
 	// Content-addressed apply: hash the desired state to detect changes.
-	templateHash, err := hashDesiredState(evalMap)
+	applyHash, err := hashDesiredState(evalMap)
 	if err != nil {
 		return nil, fmt.Errorf("hashing contribution for %s: %w", obj.GetName(), err)
 	}
 	cacheKey := resourceCacheKey(obj.GetAPIVersion(), obj.GetKind(), obj.GetNamespace(), obj.GetName())
 
 	// Check cache for hash match — skip Patch if contribution output unchanged.
-	if cached, ok := r.Resources.get(cacheKey); ok && cached.templateHash == templateHash {
+	if cached, ok := r.Resources.get(cacheKey); ok && cached.applyHash == applyHash {
 		if watcher != nil {
 			liveRV := watcher.getResourceVersion(gvr, obj.GetNamespace(), obj.GetName())
 			if liveRV != "" && liveRV == cached.resourceVersion {
@@ -683,7 +683,7 @@ func (r *GraphReconciler) applyContribution(ctx context.Context, graph *unstruct
 		} else {
 			r.Resources.set(cacheKey, &cachedObject{
 				resourceVersion: readBack.GetResourceVersion(),
-				templateHash:    templateHash,
+				applyHash:       applyHash,
 				object:          readBack.Object,
 			})
 			return readBack, nil
@@ -756,10 +756,10 @@ func (r *GraphReconciler) applyContribution(ctx context.Context, graph *unstruct
 			statusOpts = append(statusOpts, client.ForceOwnership)
 		}
 		if err := r.Client.Status().Patch(ctx, statusTarget, client.RawPatch(types.ApplyPatchType, data), statusOpts...); err != nil {
-			// Revert the cached template hash so the next reconcile retries
+			// Revert the cached apply hash so the next reconcile retries
 			// both the main resource and status subresource patches.
 			// Per 004-graph-execution.md: "If the status subresource apply
-			// fails, the controller reverts the in-memory template-hash."
+			// fails, the controller reverts the in-memory apply-hash."
 			r.Resources.remove(cacheKey)
 			if apierrors.IsConflict(err) {
 				return nil, fmt.Errorf("SSA status conflict on contribution %s/%s %s: %w: %w", obj.GetAPIVersion(), obj.GetKind(), obj.GetName(), ErrFieldConflict, err)
@@ -777,7 +777,7 @@ func (r *GraphReconciler) applyContribution(ctx context.Context, graph *unstruct
 
 	r.Resources.set(cacheKey, &cachedObject{
 		resourceVersion: readBack.GetResourceVersion(),
-		templateHash:    templateHash,
+		applyHash:       applyHash,
 		object:          readBack.Object,
 	})
 
@@ -938,7 +938,7 @@ func (r *GraphReconciler) pruneRemovedResources(ctx context.Context, graph *unst
 			continue // already gone
 		}
 
-		// Verify ownership: must have our identity label and template hash
+		// Verify ownership: must have our identity label and apply hash
 		objLabels := obj.GetLabels()
 		hasOurLabel := false
 		if objLabels != nil {
@@ -953,7 +953,7 @@ func (r *GraphReconciler) pruneRemovedResources(ctx context.Context, graph *unst
 			continue // not ours
 		}
 		objAnnotations := obj.GetAnnotations()
-		if objAnnotations == nil || objAnnotations[templateHashAnnotation] == "" {
+		if objAnnotations == nil || objAnnotations[applyHashAnnotation] == "" {
 			continue // never successfully applied by us
 		}
 
