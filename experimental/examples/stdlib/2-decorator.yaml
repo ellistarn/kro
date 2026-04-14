@@ -1,0 +1,94 @@
+# Decorator — attach resources to instances of an existing Kind.
+#
+# Implemented as a Kind (see stdlib/decorator.yaml).
+#
+# `item` is the per-instance scope variable — the watched resource.
+# WatchKind (no metadata.name) iterates all matching instances.
+# Watch (has metadata.name) targets a single resource.
+#
+# ───────────────────────────────────────────────────────────────────
+# WatchKind: "For every Namespace, create a NetworkPolicy."
+# ───────────────────────────────────────────────────────────────────
+---
+apiVersion: experimental.kro.run/v1alpha1
+kind: Decorator
+metadata:
+  name: namespace-policies
+spec:
+  watch:
+    apiVersion: v1
+    kind: Namespace
+    selector: {}
+  nodes:
+    - id: policy
+      template:
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        metadata:
+          name: default-deny
+          namespace: ${item.metadata.name}
+        spec:
+          podSelector: {}
+          policyTypes:
+            - Ingress
+---
+# ───────────────────────────────────────────────────────────────────
+# WatchKind with dependent nodes: "For every Namespace, create a
+# ResourceQuota and a NetworkPolicy that references the quota."
+# ───────────────────────────────────────────────────────────────────
+apiVersion: experimental.kro.run/v1alpha1
+kind: Decorator
+metadata:
+  name: namespace-hardening
+spec:
+  watch:
+    apiVersion: v1
+    kind: Namespace
+    selector: {}
+  nodes:
+    - id: quota
+      template:
+        apiVersion: v1
+        kind: ResourceQuota
+        metadata:
+          name: default
+          namespace: ${item.metadata.name}
+        spec:
+          hard:
+            pods: "10"
+    - id: policy
+      template:
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        metadata:
+          name: ${quota.metadata.name}-deny
+          namespace: ${item.metadata.name}
+        spec:
+          podSelector: {}
+          policyTypes:
+            - Ingress
+---
+# ───────────────────────────────────────────────────────────────────
+# Watch: "When this ConfigMap exists, create a derived Secret."
+# ───────────────────────────────────────────────────────────────────
+apiVersion: experimental.kro.run/v1alpha1
+kind: Decorator
+metadata:
+  name: config-derived-secret
+spec:
+  watch:
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: app-config
+      namespace: default
+  nodes:
+    - id: derived
+      template:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: app-config-derived
+          namespace: default
+        stringData:
+          connection: ${item.data.connectionString}

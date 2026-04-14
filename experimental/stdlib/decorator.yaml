@@ -1,0 +1,36 @@
+# Decorator — a Kind that defines the Decorator type.
+---
+apiVersion: experimental.kro.run/v1alpha1
+kind: Kind
+metadata:
+  name: decorator
+  namespace: kro-system
+spec:
+  kind: Decorator
+  group: experimental.kro.run
+  versions:
+    - name: v1alpha1
+      schema:
+        spec:
+          watch: object
+          nodes: "[]object"
+        status:
+          ready: ${controllerGraph.ready()}
+  nodes:
+    - id: controllerGraph
+      template:
+        apiVersion: experimental.kro.run/v1alpha1
+        kind: Graph
+        metadata:
+          name: decorator-${schema.metadata.namespace}-${schema.metadata.name}
+        spec:
+          nodes: >-
+            ${has(schema.spec.watch.metadata) && has(schema.spec.watch.metadata.name) && schema.spec.watch.metadata.name != ""
+              ? [{"id": "item", "template": schema.spec.watch}]
+                  + schema.spec.nodes
+              : [{"id": "items", "template": schema.spec.watch}]
+                  + schema.spec.nodes.map(n,
+                      has(n.forEach)
+                        ? n
+                        : n.merge({"forEach": {"item": "${items}"}})
+                    )}

@@ -1,0 +1,50 @@
+# Singleton — a Kind that defines the Singleton type and creates
+# a Decorator to implement priority resolution.
+#
+# Each Singleton instance's per-instance Graph creates the same
+# singleton-controller Decorator (same name, same spec). SSA merges
+# them — one Decorator, shared ownership across all instances.
+---
+apiVersion: experimental.kro.run/v1alpha1
+kind: Kind
+metadata:
+  name: singleton
+  namespace: kro-system
+spec:
+  kind: Singleton
+  group: experimental.kro.run
+  versions:
+    - name: v1alpha1
+      schema:
+        spec:
+          priority: integer | default=0
+          template: object
+  nodes:
+    - id: controller
+      template:
+        apiVersion: experimental.kro.run/v1alpha1
+        kind: Decorator
+        metadata:
+          name: singleton-controller
+          namespace: ${schema.metadata.namespace}
+        spec:
+          watch:
+            apiVersion: experimental.kro.run/v1alpha1
+            kind: Singleton
+            selector: {}
+          nodes:
+            - id: resource
+              includeWhen:
+                - >-
+                  ${!items.exists(other,
+                    other.metadata.name != item.metadata.name
+                    && other.spec.template.apiVersion == item.spec.template.apiVersion
+                    && other.spec.template.kind == item.spec.template.kind
+                    && (has(other.spec.template.metadata.namespace) ? other.spec.template.metadata.namespace : "")
+                        == (has(item.spec.template.metadata.namespace) ? item.spec.template.metadata.namespace : "")
+                    && other.spec.template.metadata.name == item.spec.template.metadata.name
+                    && (other.spec.priority > item.spec.priority
+                        || (other.spec.priority == item.spec.priority
+                            && other.metadata.name < item.metadata.name))
+                  )}
+              template: ${item.spec.template}
