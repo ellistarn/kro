@@ -6,6 +6,7 @@ package graphcontroller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -251,9 +252,7 @@ func (r *GraphReconciler) reconcileForEach(ctx context.Context, graph *unstructu
 		// Error states take precedence over Pending; deterministic errors (Error)
 		// take precedence over transient errors (SystemError, Conflict).
 		if len(childErrors) > 0 {
-			// Return the first child error — the coordinator maps it to the
-			// appropriate NodeState. Error classification happens in controller.go.
-			return keys, childErrors[0]
+			return keys, highestPriorityChildError(childErrors)
 		}
 	}
 
@@ -391,4 +390,45 @@ func (r *GraphReconciler) resolveForEachChildReference(ctx context.Context, grap
 	logger.V(1).Info("forEach child reference resolved: Contribute (resource exists, not ours)",
 		"name", child.GetName())
 	return ReferenceContribute
+}
+
+// highestPriorityChildError returns the highest-priority error from a list
+// of forEach child errors. Per 004-graph-execution.md § Parent State:
+// "Deterministic errors (Error) take precedence over transient errors
+// (SystemError, Conflict) — if any child's failure is deterministic,
+// retrying cannot resolve the parent."
+//
+// Priority order: NodeError (deterministic) > NodeConflict > NodeSystemError > NodePending.
+func highestPriorityChildError(errs []error) error {
+	if len(errs) == 0 {
+		return nil
+	}
+	best := errs[0]
+	bestPriority := childErrorPriority(best)
+	for _, err := range errs[1:] {
+		p := childErrorPriority(err)
+		if p > bestPriority {
+			best = err
+			bestPriority = p
+		}
+	}
+	return best
+}
+
+// childErrorPriority returns a numeric priority for a forEach child error.
+// Higher values mean higher priority (deterministic errors > transient).
+func childErrorPriority(err error) int {
+	if errors.Is(err, ErrPending) {
+		return 0
+	}
+	if errors.Is(err, ErrFieldConflict) {
+		return 2 // Conflict — transient, but a specific positive signal
+	}
+	info := classifyAPIError(err)
+	switch info.state {
+	case NodeSystemError:
+		return 1 // SystemError — transient
+	default:
+		return 3 // NodeError — deterministic
+	}
 }
