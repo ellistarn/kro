@@ -770,6 +770,21 @@ func TestDiamondStatePrecedence_RegressionExcludedOverBlocked(t *testing.T) {
 	t.Parallel()
 	ns := createNamespace(t)
 
+	// Pre-create the root ConfigMap externally so the Graph watches it
+	// (not owns). The test needs to flip root.data.enabled without SSA
+	// conflict, which requires the Graph to observe root via Watch.
+	rootCM := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "v1", "kind": "ConfigMap",
+			"metadata": map[string]any{
+				"name":      "diamond-root",
+				"namespace": ns,
+			},
+			"data": map[string]any{"enabled": "false"},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, rootCM))
+
 	graph := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "experimental.kro.run/v1alpha1",
@@ -780,14 +795,13 @@ func TestDiamondStatePrecedence_RegressionExcludedOverBlocked(t *testing.T) {
 			},
 			"spec": map[string]any{
 				"nodes": []any{
-					// Root: provides shared data
+					// Root: Watch over externally-managed ConfigMap
 					map[string]any{
 						"id": "root",
 						"template": map[string]any{
 							"apiVersion": "v1",
 							"kind":       "ConfigMap",
 							"metadata":   map[string]any{"name": "diamond-root"},
-							"data":       map[string]any{"enabled": "false"},
 						},
 					},
 					// Parent A: Excluded via includeWhen=false
@@ -841,7 +855,8 @@ func TestDiamondStatePrecedence_RegressionExcludedOverBlocked(t *testing.T) {
 	require.NoError(t, waitForAbsence(ctx, k8sClient, cmGVK,
 		types.NamespacedName{Name: "diamond-parent-a", Namespace: ns}, 1*time.Second))
 
-	// Now flip the toggle: enable parent A
+	// Now flip the toggle: enable parent A. updateWithRetry is safe here
+	// because root is a Watch (the Graph doesn't SSA-apply root).
 	require.NoError(t, updateWithRetry(ctx, k8sClient, cmGVK,
 		types.NamespacedName{Name: "diamond-root", Namespace: ns},
 		func(obj *unstructured.Unstructured) {

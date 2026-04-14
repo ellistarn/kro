@@ -452,6 +452,13 @@ func (w *walkState) tryDispatch(idx int) {
 				w.nodeErrors = append(w.nodeErrors, fmt.Sprintf("%s: %s", node.ID, err))
 				logger.V(0).Info("error resolving reference", "node", node.ID, "state", nodeState, "error", err)
 			}
+			// Retain previous applied keys — the resource may still exist
+			// from a prior successful apply. Without this, the resource
+			// would be a prune candidate. The prune gate independently
+			// blocks on error states, but key retention makes the error
+			// path self-contained rather than relying on a distant safety
+			// net.
+			w.carryForwardKeys(node.ID)
 			w.plan.SetState(w.dag, node.ID, nodeState)
 			w.notifyDependents(node.ID)
 			return

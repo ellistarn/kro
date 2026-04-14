@@ -2384,10 +2384,10 @@ func TestPropagateWhenGateOpenTriggersDownstream(t *testing.T) {
 // the controller (spec → compile → status condition).
 // ---------------------------------------------------------------------------
 
-// TestDeclarationError_RegressionHyphenInNodeID proves that node IDs with
+// TestDeclarationError_HyphenInNodeID proves that node IDs with
 // hyphens are rejected at compile time. Per 001-graph.md: "Hyphens are not
 // allowed — they are parsed as subtraction by the CEL evaluator."
-func TestDeclarationError_RegressionHyphenInNodeID(t *testing.T) {
+func TestDeclarationError_HyphenInNodeID(t *testing.T) {
 	t.Parallel()
 	ns := createNamespace(t)
 
@@ -2420,10 +2420,10 @@ func TestDeclarationError_RegressionHyphenInNodeID(t *testing.T) {
 	assert.Equal(t, "DeclarationError", graphCompiledReason(g))
 }
 
-// TestDeclarationError_RegressionCaseCollision proves that node IDs that
+// TestDeclarationError_CaseCollision proves that node IDs that
 // collide after lowercasing are rejected. Per 001-graph.md: "IDs that
 // collide after lowercasing are rejected at compile time."
-func TestDeclarationError_RegressionCaseCollision(t *testing.T) {
+func TestDeclarationError_CaseCollision(t *testing.T) {
 	t.Parallel()
 	ns := createNamespace(t)
 
@@ -2463,10 +2463,10 @@ func TestDeclarationError_RegressionCaseCollision(t *testing.T) {
 	assert.Equal(t, "DeclarationError", graphCompiledReason(g))
 }
 
-// TestDeclarationError_RegressionFinalizesTargetMissing proves that a
+// TestDeclarationError_FinalizesTargetMissing proves that a
 // finalizes declaration pointing at a nonexistent node ID is rejected
 // at compile time as a DeclarationError.
-func TestDeclarationError_RegressionFinalizesTargetMissing(t *testing.T) {
+func TestDeclarationError_FinalizesTargetMissing(t *testing.T) {
 	t.Parallel()
 	ns := createNamespace(t)
 
@@ -2500,9 +2500,9 @@ func TestDeclarationError_RegressionFinalizesTargetMissing(t *testing.T) {
 	assert.Equal(t, "DeclarationError", graphCompiledReason(g))
 }
 
-// TestDeclarationError_RegressionForEachVariableCollision proves that
+// TestDeclarationError_ForEachVariableCollision proves that
 // forEach iterator variable names that shadow node IDs are rejected.
-func TestDeclarationError_RegressionForEachVariableCollision(t *testing.T) {
+func TestDeclarationError_ForEachVariableCollision(t *testing.T) {
 	t.Parallel()
 	ns := createNamespace(t)
 

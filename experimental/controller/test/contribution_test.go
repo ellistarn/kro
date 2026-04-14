@@ -675,6 +675,9 @@ func TestContribute_RegressionStatusSubresourceTeardown(t *testing.T) {
 	// under .status — identity fields are ignored. The skeleton needs to
 	// include "status: {}" to release ownership.
 	//
+	// Fix: in skeletonApply, when hasStatus is true, include "status": {}
+	// in the skeleton sent to the status subresource endpoint.
+	//
 	// Asserting the actual (wrong) behavior: when the fix lands, these
 	// assertions break, forcing the fixer to update them to correct behavior.
 	var hasStatusEntry bool
