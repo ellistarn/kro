@@ -488,6 +488,7 @@ func TestParseNodeListEnforcesValidDNSLabels(t *testing.T) {
 		{name: "max length 63", id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", wantErr: false},
 
 		// Invalid cases — must be rejected
+		{name: "empty string", id: "", wantErr: true},
 		{name: "underscore", id: "foo_bar", wantErr: true},
 		{name: "multiple underscores", id: "prstatus_test_app_uat", wantErr: true},
 		{name: "dot", id: "foo.bar", wantErr: true},
