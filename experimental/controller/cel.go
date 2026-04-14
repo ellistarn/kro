@@ -410,8 +410,29 @@ func (gc *graphCaches) CacheSizes() (compiledCount, instanceCount int) {
 func compileGraphSpec(spec *GraphSpec) (*compiledGraph, error) {
 	allIDs := spec.AllIdentifiers()
 
+	// Partition identifiers: WatchKind nodes produce arrays and need
+	// list-typed declarations so CEL comprehension macros (.map(),
+	// .filter(), .exists(), .distinct()) work. All other identifiers
+	// are declared as AnyType (resolved at eval time).
+	var listIDs, scalarIDs []string
+	for _, node := range spec.Nodes {
+		if DetectReference(node.Template) == ReferenceWatchKind {
+			listIDs = append(listIDs, node.ID)
+		}
+	}
+	listSet := make(map[string]bool, len(listIDs))
+	for _, id := range listIDs {
+		listSet[id] = true
+	}
+	for _, id := range allIDs {
+		if !listSet[id] {
+			scalarIDs = append(scalarIDs, id)
+		}
+	}
+
 	env, err := krocel.DefaultEnvironment(
-		krocel.WithResourceIDs(allIDs),
+		krocel.WithResourceIDs(scalarIDs),
+		krocel.WithListVariables(listIDs),
 		krocel.WithCustomDeclarations(celPluralFunction()),
 		krocel.WithCustomDeclarations(celSimpleSchemaFunction()),
 		krocel.WithCustomDeclarations(celReadyFunction()),
