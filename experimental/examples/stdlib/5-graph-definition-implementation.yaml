@@ -1,0 +1,76 @@
+# GraphDefinition implementation — a Graph.
+#
+# GraphDefinition is the lowest standard library type. Its implementation
+# IS a Graph. The controller creates a CRD + this Graph.
+---
+apiVersion: experimental.kro.run/v1alpha1
+kind: Graph
+metadata:
+  name: webapp
+spec:
+  nodes:
+    - id: items
+      template:
+        apiVersion: experimental.kro.run/v1alpha1
+        kind: WebApp
+        selector: {}
+
+    - id: perItem
+      forEach:
+        item: ${items}
+      template:
+        apiVersion: experimental.kro.run/v1alpha1
+        kind: Graph
+        metadata:
+          name: webapp-${item.metadata.namespace}-${item.metadata.name}
+        spec:
+          nodes:
+            - id: schema
+              template:
+                apiVersion: experimental.kro.run/v1alpha1
+                kind: WebApp
+                metadata:
+                  name: ${item.metadata.name}
+                  namespace: ${item.metadata.namespace}
+
+            - id: deployment
+              template:
+                apiVersion: apps/v1
+                kind: Deployment
+                metadata:
+                  name: $${schema.metadata.name}
+                spec:
+                  replicas: $${schema.spec.replicas}
+                  selector:
+                    matchLabels:
+                      app: $${schema.metadata.name}
+                  template:
+                    metadata:
+                      labels:
+                        app: $${schema.metadata.name}
+                    spec:
+                      containers:
+                        - name: app
+                          image: $${schema.spec.image}
+
+            - id: service
+              template:
+                apiVersion: v1
+                kind: Service
+                metadata:
+                  name: $${schema.metadata.name}-svc
+                spec:
+                  selector:
+                    app: $${schema.metadata.name}
+                  ports:
+                    - port: $${schema.spec.port}
+
+            - id: status
+              template:
+                apiVersion: experimental.kro.run/v1alpha1
+                kind: WebApp
+                metadata:
+                  name: $${schema.metadata.name}
+                  namespace: $${schema.metadata.namespace}
+                status:
+                  deploymentReady: $${deployment.status.availableReplicas == deployment.spec.replicas}

@@ -1,0 +1,147 @@
+# Singleton — declare resources that should exist exactly once.
+#
+# When multiple Singletons target the same resource (same GVK + namespace +
+# name), the one with the highest priority wins. Ties broken by name
+# (lexicographic, lowest wins). Losers get status: superseded.
+#
+# Implementation: a built-in Decorator watches all Singletons, groups
+# target resources by identity, resolves priority, and creates the
+# winning version via SSA.
+#
+# The priority field is a number. Higher wins. This is the entire
+# resolution strategy — simple enough to reason about, powerful enough
+# to build higher-level concepts on top.
+#
+# ───────────────────────────────────────────────────────────────────
+# Basic: ensure a ClusterRoleBinding exists.
+# ───────────────────────────────────────────────────────────────────
+---
+apiVersion: experimental.kro.run/v1alpha1
+kind: Singleton
+metadata:
+  name: cluster-admin-binding
+spec:
+  priority: 100
+  nodes:
+    - id: binding
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        metadata:
+          name: platform-admin
+        subjects:
+          - kind: Group
+            name: platform-admins
+            apiGroup: rbac.authorization.k8s.io
+        roleRef:
+          kind: ClusterRole
+          name: cluster-admin
+          apiGroup: rbac.authorization.k8s.io
+---
+# ───────────────────────────────────────────────────────────────────
+# Conflict: two Singletons declare the same ConfigMap.
+# Team A (priority 100) vs Team B (priority 200). Team B wins.
+# ───────────────────────────────────────────────────────────────────
+apiVersion: experimental.kro.run/v1alpha1
+kind: Singleton
+metadata:
+  name: team-a-dashboard
+spec:
+  priority: 100
+  nodes:
+    - id: dashboard
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: webapp-dashboard
+          namespace: monitoring
+        data:
+          dashboard.json: '{ "title": "Team A Dashboard" }'
+---
+apiVersion: experimental.kro.run/v1alpha1
+kind: Singleton
+metadata:
+  name: team-b-dashboard
+spec:
+  priority: 200
+  nodes:
+    - id: dashboard
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: webapp-dashboard
+          namespace: monitoring
+        data:
+          dashboard.json: '{ "title": "Team B Dashboard" }'
+#
+# Result:
+#   ConfigMap/monitoring/webapp-dashboard → Team B's version (priority 200)
+#   Singleton/team-a-dashboard status: superseded by team-b-dashboard
+#   Singleton/team-b-dashboard status: active
+#
+# ───────────────────────────────────────────────────────────────────
+# Package pattern: a Singleton with a bundle of related resources.
+# "Install the monitoring stack. If someone else already installed it
+# at a higher priority, mine is a no-op."
+# ───────────────────────────────────────────────────────────────────
+---
+apiVersion: experimental.kro.run/v1alpha1
+kind: Singleton
+metadata:
+  name: monitoring-stack
+spec:
+  priority: 100
+  nodes:
+    - id: namespace
+      template:
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: monitoring
+    - id: prometheus
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: prometheus
+          namespace: monitoring
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: prometheus
+          template:
+            metadata:
+              labels:
+                app: prometheus
+            spec:
+              containers:
+                - name: prometheus
+                  image: prom/prometheus:latest
+    - id: grafana
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: grafana
+          namespace: monitoring
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: grafana
+          template:
+            metadata:
+              labels:
+                app: grafana
+            spec:
+              containers:
+                - name: grafana
+                  image: grafana/grafana:latest
+#
+# Another team can declare the same monitoring-stack at priority 200
+# and their version (maybe with different image tags or replicas) wins.
+# The losing Singleton's resources are never created — no conflict,
+# no drift, no garbage.

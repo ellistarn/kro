@@ -1,0 +1,112 @@
+# Decorator implementation — EXPLORATION, not a specification.
+#
+# Decorator is implemented as a GraphDefinition. The Decorator controller
+# translates the Decorator spec into a GraphDefinition.
+#
+# OPEN ISSUES:
+#   1. GraphDefinition always creates a CRD, but Decorator watches existing
+#      Kinds. The GraphDefinition needs a mode that skips CRD creation
+#      (or Decorator compiles directly to Graph instead).
+#   2. Decorator uses `item` in scope, GraphDefinition uses `schema`.
+#      The translation must rewrite CEL expressions.
+#   3. Watch (single resource) doesn't map cleanly to GraphDefinition,
+#      which watches a Kind (all instances). The selector/name filter
+#      would need to be part of the GraphDefinition spec.
+#
+# These examples show the INTENDED translation, acknowledging the gaps.
+#
+# ───────────────────────────────────────────────────────────────────
+# namespace-policies Decorator → GraphDefinition
+#
+# Decorator watches Namespace Kind. Translates to a GraphDefinition
+# that watches the existing Namespace Kind (skipping CRD creation).
+# `item` → `schema` in expressions.
+# ───────────────────────────────────────────────────────────────────
+---
+apiVersion: experimental.kro.run/v1alpha1
+kind: GraphDefinition
+metadata:
+  name: namespace-policies
+spec:
+  # NOTE: This references an existing Kind, not a new one.
+  # GraphDefinition would need to skip CRD creation here.
+  kind: Namespace
+  group: ""
+  versions:
+    - name: v1
+  nodes:
+    - id: policy
+      template:
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        metadata:
+          name: default-deny
+          # `item` from Decorator becomes `schema` in GraphDefinition
+          namespace: ${schema.metadata.name}
+        spec:
+          podSelector: {}
+          policyTypes:
+            - Ingress
+---
+# ───────────────────────────────────────────────────────────────────
+# namespace-hardening Decorator → GraphDefinition
+# ───────────────────────────────────────────────────────────────────
+apiVersion: experimental.kro.run/v1alpha1
+kind: GraphDefinition
+metadata:
+  name: namespace-hardening
+spec:
+  kind: Namespace
+  group: ""
+  versions:
+    - name: v1
+  nodes:
+    - id: quota
+      template:
+        apiVersion: v1
+        kind: ResourceQuota
+        metadata:
+          name: default
+          namespace: ${schema.metadata.name}
+        spec:
+          hard:
+            pods: "10"
+    - id: policy
+      template:
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        metadata:
+          name: ${quota.metadata.name}-deny
+          namespace: ${schema.metadata.name}
+        spec:
+          podSelector: {}
+          policyTypes:
+            - Ingress
+---
+# ───────────────────────────────────────────────────────────────────
+# config-derived-secret Decorator (Watch single resource) → GraphDefinition
+#
+# NOTE: This is the weakest translation. Decorator watches a single
+# ConfigMap by name. GraphDefinition watches a Kind (all instances).
+# The single-resource semantics would need a name filter on the
+# GraphDefinition, or this case compiles directly to Graph instead.
+# ───────────────────────────────────────────────────────────────────
+apiVersion: experimental.kro.run/v1alpha1
+kind: GraphDefinition
+metadata:
+  name: config-derived-secret
+spec:
+  kind: ConfigMap
+  group: ""
+  versions:
+    - name: v1
+  nodes:
+    - id: derived
+      template:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: app-config-derived
+          namespace: default
+        stringData:
+          connection: ${schema.data.connectionString}

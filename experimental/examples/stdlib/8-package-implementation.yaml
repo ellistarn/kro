@@ -1,0 +1,252 @@
+# Package implementation — expressed as Singletons.
+#
+# Package compiles to Singleton by converting semver to priority:
+#   priority = major * 1000000 + minor * 1000 + patch
+#
+# This preserves semver ordering: v1.0.0 (1000000) > v0.999.999 (999999).
+# The Singleton machinery (sort by priority, distinct by GVKNN) handles
+# the rest. No separate Package controller needed — just the conversion.
+#
+# Major version conflicts are detected at the Package level before
+# conversion: if two Packages have different major versions, both get
+# MajorVersionConflict status and neither produces a Singleton.
+#
+# ───────────────────────────────────────────────────────────────────
+# Package/kro v0.2.0 → Singleton (priority = 0*1000000 + 2*1000 + 0 = 2000)
+# ───────────────────────────────────────────────────────────────────
+---
+apiVersion: experimental.kro.run/v1alpha1
+kind: Singleton
+metadata:
+  name: kro-v0-2-0
+spec:
+  priority: 2000
+  nodes:
+    - id: namespace
+      template:
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: kro-system
+
+    - id: graphsCRD
+      template:
+        apiVersion: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        metadata:
+          name: graphs.experimental.kro.run
+        spec:
+          group: experimental.kro.run
+          names:
+            plural: graphs
+            singular: graph
+            kind: Graph
+            listKind: GraphList
+          scope: Namespaced
+          versions:
+            - name: v1alpha1
+              served: true
+              storage: true
+              schema:
+                openAPIV3Schema:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+              subresources:
+                status: {}
+
+    - id: serviceAccount
+      template:
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: graph-controller
+          namespace: kro-system
+
+    - id: clusterRole
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        metadata:
+          name: graph-controller
+        rules:
+          - apiGroups: ["experimental.kro.run"]
+            resources: ["graphs", "graphs/status", "graphrevisions", "graphrevisions/status"]
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+          - apiGroups: ["*"]
+            resources: ["*"]
+            verbs: ["get", "list", "watch", "create", "patch", "delete"]
+          - apiGroups: ["*"]
+            resources: ["*/status"]
+            verbs: ["get", "patch"]
+          - apiGroups: [""]
+            resources: ["events"]
+            verbs: ["create", "patch"]
+          - apiGroups: ["coordination.k8s.io"]
+            resources: ["leases"]
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+    - id: clusterRoleBinding
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        metadata:
+          name: graph-controller
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: ClusterRole
+          name: graph-controller
+        subjects:
+          - kind: ServiceAccount
+            name: graph-controller
+            namespace: kro-system
+
+    - id: controller
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: graph-controller
+          namespace: kro-system
+          labels:
+            app: graph-controller
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: graph-controller
+          template:
+            metadata:
+              labels:
+                app: graph-controller
+            spec:
+              serviceAccountName: graph-controller
+              containers:
+                - name: controller
+                  image: ko://github.com/kubernetes-sigs/kro/experimental/cmd
+                  resources:
+                    requests:
+                      cpu: 100m
+                      memory: 128Mi
+                    limits:
+                      memory: 512Mi
+---
+# ───────────────────────────────────────────────────────────────────
+# Package/kro v0.2.1 → Singleton (priority = 0*1000000 + 2*1000 + 1 = 2001)
+# This Singleton has higher priority → wins over v0.2.0 in the
+# Singleton Decorator's sort + distinct.
+# ───────────────────────────────────────────────────────────────────
+apiVersion: experimental.kro.run/v1alpha1
+kind: Singleton
+metadata:
+  name: kro-v0-2-1
+spec:
+  priority: 2001
+  nodes:
+    - id: namespace
+      template:
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: kro-system
+    - id: graphsCRD
+      template:
+        apiVersion: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        metadata:
+          name: graphs.experimental.kro.run
+        spec:
+          group: experimental.kro.run
+          names:
+            plural: graphs
+            singular: graph
+            kind: Graph
+            listKind: GraphList
+          scope: Namespaced
+          versions:
+            - name: v1alpha1
+              served: true
+              storage: true
+              schema:
+                openAPIV3Schema:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+              subresources:
+                status: {}
+    - id: serviceAccount
+      template:
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: graph-controller
+          namespace: kro-system
+    - id: clusterRole
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        metadata:
+          name: graph-controller
+        rules:
+          - apiGroups: ["experimental.kro.run"]
+            resources: ["graphs", "graphs/status", "graphrevisions", "graphrevisions/status"]
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+          - apiGroups: ["*"]
+            resources: ["*"]
+            verbs: ["get", "list", "watch", "create", "patch", "delete"]
+          - apiGroups: ["*"]
+            resources: ["*/status"]
+            verbs: ["get", "patch"]
+          - apiGroups: [""]
+            resources: ["events"]
+            verbs: ["create", "patch"]
+          - apiGroups: ["coordination.k8s.io"]
+            resources: ["leases"]
+            verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    - id: clusterRoleBinding
+      template:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        metadata:
+          name: graph-controller
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: ClusterRole
+          name: graph-controller
+        subjects:
+          - kind: ServiceAccount
+            name: graph-controller
+            namespace: kro-system
+    - id: controller
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: graph-controller
+          namespace: kro-system
+          labels:
+            app: graph-controller
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: graph-controller
+          template:
+            metadata:
+              labels:
+                app: graph-controller
+            spec:
+              serviceAccountName: graph-controller
+              containers:
+                - name: controller
+                  image: ko://github.com/kubernetes-sigs/kro/experimental/cmd
+                  resources:
+                    requests:
+                      cpu: 100m
+                      memory: 128Mi
+                    limits:
+                      memory: 512Mi
+#
+# Both Singletons feed into the Singleton Decorator (file 7):
+#   sort by priority: [kro-v0-2-1 (2001), kro-v0-2-0 (2000)]
+#   flatMap nodes: [v0.2.1's Namespace, CRD, SA, ... , v0.2.0's Namespace, CRD, SA, ...]
+#   distinct by GVKNN: [v0.2.1's Namespace, v0.2.1's CRD, v0.2.1's SA, ...]
+#   forEach: create v0.2.1's resources. v0.2.0's are dropped by distinct.

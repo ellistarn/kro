@@ -1,0 +1,45 @@
+# Singleton implementation — a Decorator.
+#
+# A built-in Decorator watches all Singletons. It:
+#   1. Sorts Singletons by priority (highest first, name as tiebreaker)
+#   2. Flattens all nodes across all Singletons into one list
+#   3. Maps each to its resource identity (GVK + namespace + name)
+#   4. Distincts by identity — first occurrence wins (highest priority)
+#   5. ForEach distinct resource, creates it once
+#
+# No special resolution logic. Just sort + flatten + distinct + forEach.
+# The same pattern as Decorator's distinct mapping, applied to Singletons.
+#
+# ───────────────────────────────────────────────────────────────────
+# The built-in Decorator that implements Singleton
+# ───────────────────────────────────────────────────────────────────
+---
+apiVersion: experimental.kro.run/v1alpha1
+kind: Decorator
+metadata:
+  name: singleton-controller
+spec:
+  watch:
+    apiVersion: experimental.kro.run/v1alpha1
+    kind: Singleton
+    selector: {}
+  nodes:
+    # Sort items by priority descending, flatten all nodes, distinct by
+    # GVKNN, forEach create. Each resource is created exactly once from
+    # the highest-priority Singleton that declares it.
+    - id: resources
+      forEach:
+        resource: ${items.sortBy(s, -s.spec.priority).flatMap(s, s.spec.nodes).map(n, n.template).distinct(t, t.apiVersion + t.kind + t.metadata.namespace + t.metadata.name)}
+      template: ${resource}
+#
+# Example with two Singletons:
+#   team-a (priority 100): ConfigMap/monitoring/webapp-dashboard "Team A"
+#   team-b (priority 200): ConfigMap/monitoring/webapp-dashboard "Team B"
+#
+# After sort: [team-b, team-a]
+# After flatMap: [team-b's ConfigMap, team-a's ConfigMap]
+# After distinct by GVKNN: [team-b's ConfigMap]  (first wins)
+# ForEach: create team-b's version. Done.
+#
+# No conflicts. No CEL priority expressions per-node. Just the
+# primitives we already have: sort, flatMap, distinct, forEach.
