@@ -1,4 +1,4 @@
-# Graph Execution
+# Graph Reconciliation
 
 How the controller reconciles a Graph. The DAG is the dependency structure between nodes. Watches
 bring external state in. Performance is structural — work is proportional to change, not to DAG
