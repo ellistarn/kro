@@ -33,7 +33,11 @@ The Graph spec compiles into a DAG — one node per resource declaration, edges 
 expression references. Node types (Own, Watch, WatchKind, Contribute, Definition) are defined in
 [001-graph](001-graph.md) and [003-ownership](003-ownership.md). There is always exactly one target
 DAG, produced from the latest revision (see [002-revisions](002-revisions.md)). When the spec
-changes, a new revision is compiled and all nodes enter the frontier.
+changes, a new revision is compiled and all nodes enter the frontier. There is no concurrent
+convergence across revisions within a single Graph — in-progress evaluation of the previous revision
+is abandoned. Partially applied resources either match the new revision's templates (kept) or don't
+(pruned). The Graph boundary is where convergence independence is introduced: separate Graphs
+reconcile independently, each with their own scope, revision, and watches.
 
 ### Scope
 
