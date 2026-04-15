@@ -348,7 +348,9 @@ a skip.
 Each node has an in-memory resync timer with a jittered interval (default 30 minutes) — a
 consistency floor bounding how long any divergence can persist. Watches can miss divergence
 (disconnects, cache staleness); hash-matched skips don't detect server-side drift (external edits,
-admission webhooks). On expiry, the node is triggered and applies unconditionally.
+admission webhooks). On expiry, the node is triggered and applies unconditionally. Resync respects
+the propagateWhen gate — a gated node's resync timer fires but evaluation is deferred until the gate
+opens.
 
 SSA is idempotent; apply corrects drift as a side effect and resets the timer. A skipped node does
 not reset its timer — frequent reconciles from other nodes' events don't perpetually push it
