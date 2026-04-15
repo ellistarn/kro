@@ -19,6 +19,12 @@ import (
 
 const applyHashAnnotation = "internal.kro.run/template-hash"
 
+// applyHashStatusPending is the sentinel value written to the apply-hash
+// annotation when the status subresource patch fails. It cannot collide
+// with any real template hash (hashDesiredState produces hex-encoded FNV-64a)
+// and forces re-apply on controller restart (cold cache).
+const applyHashStatusPending = "status-pending"
+
 // hashDesiredState computes a content hash of an evaluated template map.
 // Uses FNV-64a over Go's json.Marshal output. json.Marshal produces
 // deterministic output for map[string]any (keys sorted at every level),

@@ -495,24 +495,9 @@ func TestStatusSubresourceSplitApplyRevertOnFailure(t *testing.T) {
 		Group: "test.kro.run", Version: "v1alpha1", Kind: "StrictStatus",
 	}
 
-	// Pre-create a StrictStatus CR with valid status.
-	target := &unstructured.Unstructured{
-		Object: map[string]any{
-			"apiVersion": "test.kro.run/v1alpha1",
-			"kind":       "StrictStatus",
-			"metadata": map[string]any{
-				"name":      "split-apply-target",
-				"namespace": ns,
-			},
-			"spec": map[string]any{
-				"name": "test",
-			},
-		},
-	}
-	require.NoError(t, k8sClient.Create(ctx, target))
-	t.Log("StrictStatus CR pre-created")
-
-	// Phase 1: Graph writes VALID status.phase="Running".
+	// Phase 1: Graph creates and owns a StrictStatus CR with valid status.
+	// No pre-creation — the Graph must Own the resource so the apply-hash
+	// annotation is set (Contribute nodes don't get apply-hash).
 	graph := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "experimental.kro.run/v1alpha1",
@@ -533,6 +518,9 @@ func TestStatusSubresourceSplitApplyRevertOnFailure(t *testing.T) {
 								"annotations": map[string]any{
 									"kro.run/version": "v1",
 								},
+							},
+							"spec": map[string]any{
+								"name": "test",
 							},
 							"status": map[string]any{
 								"phase":   "Running",
@@ -562,6 +550,17 @@ func TestStatusSubresourceSplitApplyRevertOnFailure(t *testing.T) {
 		types.NamespacedName{Name: "test-split-apply", Namespace: ns}))
 	t.Log("Phase 1: Valid status applied (phase=Running), Graph Ready")
 
+	// Record the apply-hash annotation from the successful apply. This is the
+	// value we'll compare against after the status failure to prove the hash
+	// wasn't advanced.
+	checkTarget := &unstructured.Unstructured{}
+	checkTarget.SetGroupVersionKind(strictGVK)
+	require.NoError(t, k8sClient.Get(ctx,
+		types.NamespacedName{Name: "split-apply-target", Namespace: ns}, checkTarget))
+	hashBeforeFailure := checkTarget.GetAnnotations()["internal.kro.run/template-hash"]
+	require.NotEmpty(t, hashBeforeFailure, "apply-hash annotation must be set after successful apply")
+	t.Logf("Phase 1: apply-hash after success = %s", hashBeforeFailure)
+
 	// Phase 2: Update Graph to write INVALID status.phase="InvalidPhase".
 	// Main apply (annotations) succeeds, status apply gets 422.
 	require.NoError(t, updateWithRetry(ctx, k8sClient, GraphGVK,
@@ -577,6 +576,9 @@ func TestStatusSubresourceSplitApplyRevertOnFailure(t *testing.T) {
 							"annotations": map[string]any{
 								"kro.run/version": "v2-invalid-status",
 							},
+						},
+						"spec": map[string]any{
+							"name": "test",
 						},
 						"status": map[string]any{
 							"phase":   "InvalidPhase",
@@ -602,17 +604,23 @@ func TestStatusSubresourceSplitApplyRevertOnFailure(t *testing.T) {
 	t.Log("Graph entered non-Ready state (status apply failed)")
 
 	// THE KEY ASSERTION: status.phase must still be "Running" (the invalid
-	// value was rejected by CRD validation). If the apply-hash was
-	// incorrectly advanced, a subsequent reconcile would skip the apply
-	// and status would never be corrected.
-	checkTarget := &unstructured.Unstructured{}
-	checkTarget.SetGroupVersionKind(strictGVK)
+	// value was rejected by CRD validation). And the apply-hash annotation
+	// must NOT match the desired state hash — if it did, the controller would
+	// skip re-apply on restart and the status would be silently lost.
+	// The fix reverts the annotation to "status-pending" sentinel on status
+	// subresource failure, ensuring mismatch on restart.
 	require.NoError(t, k8sClient.Get(ctx,
 		types.NamespacedName{Name: "split-apply-target", Namespace: ns}, checkTarget))
 	statusMap, _, _ := unstructured.NestedMap(checkTarget.Object, "status")
 	assert.Equal(t, "Running", statusMap["phase"],
 		"status.phase must remain Running — invalid status apply should have been rejected")
-	t.Log("Status.phase still Running — invalid value correctly rejected")
+
+	hashAfterFailure := checkTarget.GetAnnotations()["internal.kro.run/template-hash"]
+	assert.NotEqual(t, hashBeforeFailure, hashAfterFailure,
+		"apply-hash must NOT match the pre-failure hash — it should be reverted to prevent hash-stuck state on restart")
+	assert.Equal(t, "status-pending", hashAfterFailure,
+		"apply-hash should be reverted to sentinel value (applyHashStatusPending) after status failure")
+	t.Logf("Phase 2: apply-hash after failure = %s (reverted from %s)", hashAfterFailure, hashBeforeFailure)
 
 	// Phase 3: Fix the Graph to write valid status.phase="Stopped".
 	require.NoError(t, updateWithRetry(ctx, k8sClient, GraphGVK,
@@ -628,6 +636,9 @@ func TestStatusSubresourceSplitApplyRevertOnFailure(t *testing.T) {
 							"annotations": map[string]any{
 								"kro.run/version": "v3-fixed",
 							},
+						},
+						"spec": map[string]any{
+							"name": "test",
 						},
 						"status": map[string]any{
 							"phase":   "Stopped",

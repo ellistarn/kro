@@ -631,6 +631,36 @@ func (r *GraphReconciler) applySSA(ctx context.Context, graph *unstructured.Unst
 		}
 		if err := r.Client.Status().Patch(ctx, statusTarget, client.RawPatch(types.ApplyPatchType, sData), statusOpts...); err != nil {
 			r.Resources.remove(cacheKey)
+			// Revert the apply-hash annotation. The main Patch already wrote
+			// the new hash, but the status wasn't applied. On controller
+			// restart (cold cache), the stale hash would match the desired
+			// state and skip re-apply — silently losing the status fields.
+			// Setting it to a sentinel ensures mismatch on restart.
+			//
+			// If this revert patch itself fails, the system still self-heals:
+			// cache.remove above clears the in-memory cache, and cache miss
+			// forces re-apply regardless of the annotation value (line 504
+			// requires both cache hit AND hash match).
+			if ref == ReferenceOwn {
+				revertPayload := map[string]any{
+					"apiVersion": obj.GetAPIVersion(),
+					"kind":       obj.GetKind(),
+					"metadata": map[string]any{
+						"name":      obj.GetName(),
+						"namespace": obj.GetNamespace(),
+						"annotations": map[string]any{
+							applyHashAnnotation: applyHashStatusPending,
+						},
+					},
+				}
+				if revertData, mErr := json.Marshal(revertPayload); mErr == nil {
+					revertTarget := &unstructured.Unstructured{}
+					revertTarget.SetGroupVersionKind(obj.GroupVersionKind())
+					revertTarget.SetName(obj.GetName())
+					revertTarget.SetNamespace(obj.GetNamespace())
+					_ = r.Client.Patch(ctx, revertTarget, client.RawPatch(types.ApplyPatchType, revertData), patchOpts...)
+				}
+			}
 			if apierrors.IsConflict(err) {
 				return nil, fmt.Errorf("SSA status conflict on %s/%s %s: %w: %w", obj.GetAPIVersion(), obj.GetKind(), obj.GetName(), ErrFieldConflict, err)
 			}
