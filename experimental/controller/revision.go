@@ -118,6 +118,8 @@ func snapshotNode(node Node) map[string]any {
 
 	if node.Template != nil {
 		entry["template"] = deepCopyMap(node.Template)
+	} else if node.TemplateExpr != "" {
+		entry["template"] = node.TemplateExpr
 	}
 	if node.ForEach != nil {
 		fe := make(map[string]any, len(node.ForEach))
@@ -128,6 +130,9 @@ func snapshotNode(node Node) map[string]any {
 	}
 	if node.Finalizes != "" {
 		entry["finalizes"] = node.Finalizes
+	}
+	if node.Force {
+		entry["force"] = true
 	}
 	if len(node.IncludeWhen) > 0 {
 		iw := make([]any, len(node.IncludeWhen))

@@ -74,7 +74,7 @@ func (r *GraphReconciler) reconcileNode(ctx context.Context, graph *unstructured
 // (literals and/or CEL expressions) and enters the result into scope as
 // map[string]any. No Kubernetes API calls are made.
 func (r *GraphReconciler) reconcileDefinition(ctx context.Context, node Node, eval *evaluator) error {
-	result, err := eval.toMap(node.Template)
+	result, err := eval.toMapNode(node)
 	if err != nil {
 		return fmt.Errorf("definition %s: %w", node.ID, err)
 	}
@@ -91,7 +91,7 @@ func (r *GraphReconciler) reconcileDefinition(ctx context.Context, node Node, ev
 func (r *GraphReconciler) resolveReference(ctx context.Context, graph *unstructured.Unstructured, node Node, eval *evaluator) (Reference, error) {
 	logger := log.FromContext(ctx)
 
-	evalMap, err := eval.toMap(node.Template)
+	evalMap, err := eval.toMapNode(node)
 	if err != nil {
 		// Template can't evaluate yet — expressions unresolvable.
 		// Return Unresolved so it's retried next reconcile.
@@ -99,8 +99,8 @@ func (r *GraphReconciler) resolveReference(ctx context.Context, graph *unstructu
 	}
 
 	obj := &unstructured.Unstructured{Object: evalMap}
-	if isForceApply(obj) {
-		logger.V(1).Info("reference resolved: Own (Force annotation)", "node", node.ID)
+	if isForceApply(obj) || node.Force {
+		logger.V(1).Info("reference resolved: Own (Force)", "node", node.ID)
 		return ReferenceOwn, nil
 	}
 
@@ -165,7 +165,7 @@ func (r *GraphReconciler) classifyReference(ctx context.Context, graph *unstruct
 func (r *GraphReconciler) reconcileWatch(ctx context.Context, graph *unstructured.Unstructured, node Node, eval *evaluator, watcher *graphWatcher) error {
 	logger := log.FromContext(ctx)
 
-	tmpl, err := eval.toMap(node.Template)
+	tmpl, err := eval.toMapNode(node)
 	if err != nil {
 		return fmt.Errorf("watch %s: %w", node.ID, err)
 	}
@@ -212,7 +212,7 @@ func (r *GraphReconciler) reconcileWatch(ctx context.Context, graph *unstructure
 func (r *GraphReconciler) reconcileWatchKind(ctx context.Context, graph *unstructured.Unstructured, node Node, eval *evaluator, watcher *graphWatcher) error {
 	logger := log.FromContext(ctx)
 
-	tmpl, err := eval.toMap(node.Template)
+	tmpl, err := eval.toMapNode(node)
 	if err != nil {
 		return fmt.Errorf("watchKind %s: %w", node.ID, err)
 	}
@@ -405,9 +405,26 @@ func (r *GraphReconciler) reconcileWatchKind(ctx context.Context, graph *unstruc
 func (r *GraphReconciler) reconcileApply(ctx context.Context, graph *unstructured.Unstructured, node Node, ref Reference, eval *evaluator, watcher *graphWatcher, driftCorrection bool) (string, error) {
 	logger := log.FromContext(ctx)
 
-	evalMap, err := eval.toMap(node.Template)
+	evalMap, err := eval.toMapNode(node)
 	if err != nil {
 		return "", fmt.Errorf("%s %s: %w", ref, node.ID, err)
+	}
+
+	// Node-level force: inject the force annotation so applySSA uses
+	// ForceOwnership. This allows nodes like Singleton's target to
+	// take ownership of resources created by other Graphs.
+	if node.Force {
+		md, _ := evalMap["metadata"].(map[string]any)
+		if md == nil {
+			md = map[string]any{}
+			evalMap["metadata"] = md
+		}
+		ann, _ := md["annotations"].(map[string]any)
+		if ann == nil {
+			ann = map[string]any{}
+			md["annotations"] = ann
+		}
+		ann[applyAnnotation] = applyAnnotationForce
 	}
 
 	applied, err := r.applySSA(ctx, graph, evalMap, watcher, node.ID, ref, driftCorrection)

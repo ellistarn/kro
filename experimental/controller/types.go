@@ -175,8 +175,10 @@ func isIdentityOnly(tmpl map[string]any) bool {
 // produces.
 type Node struct {
 	ID            string
-	Template      map[string]any
+	Template      map[string]any // static template — keys are literal, values may contain ${...}
+	TemplateExpr  string         // CEL expression evaluating to the entire template map at runtime
 	ForEach       map[string]string
+	Force         bool   // force Own reference regardless of resource existence
 	Finalizes     string // target node ID — resource created only during prune/teardown
 	IncludeWhen   []string
 	ReadyWhen     []string // CEL conditions; all must be true for the node to be "ready"
@@ -218,6 +220,11 @@ type Node struct {
 // Reference returns the Reference type of this node's template.
 func (n *Node) Reference() Reference {
 	return DetectReference(n.Template)
+}
+
+// HasTemplate returns true if the node has a template (static or expression).
+func (n *Node) HasTemplate() bool {
+	return n.Template != nil || n.TemplateExpr != ""
 }
 
 // GraphSpec holds the parsed spec of a Graph object.
@@ -279,6 +286,9 @@ func (s *GraphSpec) AllExpressions() []string {
 	for _, node := range s.Nodes { // Template expressions
 		var templateStrings []string
 		collectStrings(node.Template, &templateStrings)
+		if node.TemplateExpr != "" {
+			templateStrings = append(templateStrings, node.TemplateExpr)
+		}
 		add(templateStrings)
 
 		// ForEach collection expressions
@@ -362,9 +372,14 @@ func parseNodeList(raw any) ([]Node, error) {
 		node.ID = id
 		if tmpl, ok := m["template"].(map[string]any); ok {
 			node.Template = tmpl
+		} else if tmplExpr, ok := m["template"].(string); ok {
+			node.TemplateExpr = tmplExpr
 		}
 		if fin, ok := m["finalizes"].(string); ok {
 			node.Finalizes = fin
+		}
+		if force, ok := m["force"].(bool); ok {
+			node.Force = force
 		}
 		if fe, ok := m["forEach"].(map[string]any); ok {
 			// Flat map format (Graph templates): forEach: {region: "${...}"}
