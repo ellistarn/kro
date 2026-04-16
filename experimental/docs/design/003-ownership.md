@@ -111,6 +111,73 @@ per-child: each child's managed resource carries the child's identity label and 
 Own/Contribute rules as any other node. The parent is a logical node with no managed resource and
 no ownership semantics.
 
+### Transitions
+
+The Own/Contribute split is resolved per-revision, not per-node-identity. Each revision's first
+reconcile classifies every ambiguous node against the cluster's current state. Classifications are
+not inherited across revisions; a new revision re-resolves from scratch. Within a revision,
+classification is stable unless a named reset path fires — reset paths are enumerated below and
+in [004-graph-reconciliation](004-graph-reconciliation.md).
+
+Classification is determined per revision from the node's template shape and the cluster state at
+resolution time. Template shape changes between revisions (e.g., removing the resource body and
+keeping only status fields) produce a fresh classification, not a transition in the sense defined
+here. This section covers only the case where template shape is stable across revisions and
+classification flips due to a change in cluster state.
+
+The transition is asymmetric. Contribute can become Own; Own cannot become Contribute. Once a
+Graph creates a resource it remains the creator — another actor arriving to write disjoint fields
+is Coexistence, another actor arriving to write contested fields is a Conflict, and neither path
+reclassifies the existing owner. A Contribute node initially classified against another Graph's
+owned resource is a first classification, not a transition, and falls under Coexistence.
+
+The Contribute→Own transition fires when a node re-resolves against a target that no longer has
+another actor's ownership. Two concrete sequences produce this:
+
+- **Creator torn down.** Graph A owns resource X. Graph B contributes to X. Graph A is deleted; its
+  teardown removes X. Graph B's next reconcile detects X absent and routes the node to Excluded;
+  the reconcile after that re-resolves, classifies Own, and creates X on the next apply.
+- **Creator released.** Graph A's Own template for X is removed from its spec. Graph A's prune
+  removes X. Graph B, which contributed to X, follows the same Excluded → re-resolve → Own path
+  on its next two reconciles.
+
+When an Own node is removed from spec, its target is deleted regardless of whether other Graphs
+are contributing fields. Contributors are responsible for their own revival — on the reconcile
+following target-absence detection, a contributor's node re-resolves and classifies Own, then
+recreates the resource on the next apply. During the window between the creator's prune and the
+contributor's recovery, contributed fields are lost. Applications that cannot tolerate this loss
+must coordinate through spec changes, not rely on ambient ownership transitions.
+
+The contested-migration case — Graph B taking X from Graph A while A still owns it — is covered by
+the Migration scenario, not by this transition. Migration uses `kro.run/apply: Force` to override
+the identity label check; it is user-driven, not a consequence of re-resolution.
+
+Mid-revision, a Contribute node whose target is found absent enters the Excluded state. The node
+does not apply (there is no target to patch) and downstream nodes that depend on it cannot
+evaluate. Excluded is one of the reset paths for resolved classification — the next reconcile
+re-resolves, and if the target is still absent, the node classifies Own. This preserves the
+revision-boundary rule (resolution does not spontaneously flip mid-reconcile) while giving the
+creator-torn-down case a bounded recovery path: the contributor reaches Own on the reconcile
+following target-absence detection. Wall-clock latency depends on the controller's reconcile
+cadence and requeue policy, not on this contract.
+
+The transition's state migration covers every piece of per-revision state keyed on classification:
+
+- **Identity label.** The label value on the target changes from `contribute` to `own`. This happens
+  naturally on the Own apply — the template includes the label with the new value, SSA overwrites.
+- **Applied-set key.** Contribute entries are keyed with a `contribute:` prefix; Own entries are
+  keyed bare. After re-resolution, the node's applied-set entry moves from the prefixed form to
+  the bare form. Prune treats the two forms as the same target when they identify the same
+  resource — adoption, not orphan-and-recreate.
+- **Managed-field ownership.** The Graph's field manager already owned the Contribute fields. The
+  Own apply extends ownership to the full template without a handoff; SSA treats the expanded field
+  set as additive.
+
+The reconcile-time mechanics of re-resolution — when the reset paths fire, how state migrates
+during a reconcile pass — are covered in [004-graph-reconciliation](004-graph-reconciliation.md).
+This section covers only the ownership-level contract: what transitions exist, what stays coherent,
+what direction classification can flow.
+
 ## Scenarios
 
 **Coexistence.** The steady state. Multiple writers — Graphs, controllers, HPAs — each own disjoint
