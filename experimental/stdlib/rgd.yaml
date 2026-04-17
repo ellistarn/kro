@@ -51,8 +51,8 @@ spec:
         kind: CustomResourceDefinition
         metadata:
           name: ${plural(schema.spec.schema.kind).lowerAscii()}.${schema.spec.schema.group}
-          labels: '${has(schema.spec.schema.metadata) && has(schema.spec.schema.metadata.labels) ? schema.spec.schema.metadata.labels : {}}'
-          annotations: '${has(schema.spec.schema.metadata) && has(schema.spec.schema.metadata.annotations) ? schema.spec.schema.metadata.annotations : {}}'
+          labels: '${has(dyn(schema.spec.schema).metadata) && has(dyn(schema.spec.schema).metadata.labels) ? dyn(schema.spec.schema).metadata.labels : {}}'
+          annotations: '${has(dyn(schema.spec.schema).metadata) && has(dyn(schema.spec.schema).metadata.annotations) ? dyn(schema.spec.schema).metadata.annotations : {}}'
         spec:
           group: ${schema.spec.schema.group}
           names:
@@ -66,11 +66,11 @@ spec:
               subresources:
                 status: {}
               schema:
-                openAPIV3Schema: ${simpleSchema.toOpenAPI(schema.spec.schema, schema.spec.resources)}
+                openAPIV3Schema: ${simpleSchema.toOpenAPI(dyn(schema.spec.schema), dyn(schema.spec.resources))}
 
     - id: watchInstances
       includeWhen:
-        - ${has(crd.status) && has(crd.status.conditions) && crd.status.conditions != null && crd.status.conditions.exists(c, c.type == 'Established' && c.status == 'True')}
+        - ${has(crd.status) && has(crd.status.conditions) && crd.status.conditions.exists(c, c.type == 'Established' && c.status == 'True')}
       # No metadata.namespace: watch custom resource instances across all
       # namespaces (k8s list/watch semantics — absent namespace = all).
       watch:
@@ -150,19 +150,19 @@ spec:
           #   field ownership should use Kind directly, not RGD.
           nodes: >-
             ${
-              [{"id": "schema", "ref": {
+              dyn([{"id": "schema", "ref": {
                 "apiVersion": schema.spec.schema.group + "/" + schema.spec.schema.apiVersion,
                 "kind": schema.spec.schema.kind,
                 "metadata": {
                   "name": instance.metadata.name,
                   "namespace": instance.metadata.namespace
                 }
-              }}]
-              + schema.spec.resources.map(r, r.merge({
-                "propagateWhen": has(r.readyWhen) ? r.readyWhen : ["true"],
-                "template": r.template.merge({
-                  "metadata": (has(r.template.metadata) ? r.template.metadata : {}).merge({
-                    "labels": (has(r.template.metadata) && has(r.template.metadata.labels) ? r.template.metadata.labels : {}).merge({
+              }}])
+              + dyn(schema.spec.resources).map(origR, dyn(origR).merge({
+                "propagateWhen": has(dyn(origR).readyWhen) ? dyn(origR).readyWhen : ["true"],
+                "template": dyn(origR).template.merge({
+                  "metadata": (has(dyn(origR).template.metadata) ? dyn(origR).template.metadata : {}).merge({
+                    "labels": (has(dyn(origR).template.metadata) && has(dyn(origR).template.metadata.labels) ? dyn(origR).template.metadata.labels : {}).merge({
                       "kro.run/instance-id": string(instance.metadata.uid),
                       "kro.run/instance-name": instance.metadata.name,
                       "kro.run/instance-namespace": instance.metadata.namespace,
@@ -170,14 +170,14 @@ spec:
                       "kro.run/instance-version": schema.spec.schema.apiVersion,
                       "kro.run/instance-kind": schema.spec.schema.kind
                     }),
-                    "annotations": (has(r.template.metadata) && has(r.template.metadata.annotations) ? r.template.metadata.annotations : {}).merge({
+                    "annotations": (has(dyn(origR).template.metadata) && has(dyn(origR).template.metadata.annotations) ? dyn(origR).template.metadata.annotations : {}).merge({
                       "kro.run/apply": "Force"
                     })
                   })
                 })
               }))
-              + [{"id": "rgdInstanceStatus",
-                 "readyWhen": (schema.spec.resources.size() == 0 ? ["${true}"] : schema.spec.resources.map(r, "${" + r.id + ".ready()}")),
+              + dyn([{"id": "rgdInstanceStatus",
+                 "readyWhen": (dyn(schema.spec.resources).size() == 0 ? ["${true}"] : dyn(schema.spec.resources).map(r, "${" + dyn(r).id + ".ready()}")),
                  "patch": {
                 "apiVersion": schema.spec.schema.group + "/" + schema.spec.schema.apiVersion,
                 "kind": schema.spec.schema.kind,
@@ -186,18 +186,18 @@ spec:
                   "namespace": instance.metadata.namespace
                 },
                 "status": {
-                  "state": "${" + (schema.spec.resources.size() == 0 ? "true" : schema.spec.resources.map(r, r.id + ".ready()").join(" && ")) + " ? 'ACTIVE' : 'IN_PROGRESS'}",
+                  "state": "${" + (dyn(schema.spec.resources).size() == 0 ? "true" : dyn(schema.spec.resources).map(r, dyn(r).id + ".ready()").join(" && ")) + " ? 'ACTIVE' : 'IN_PROGRESS'}",
                   "conditions": [
                     {
                       "type": "Ready",
-                      "status": "${" + (schema.spec.resources.size() == 0 ? "true" : schema.spec.resources.map(r, r.id + ".ready()").join(" && ")) + " ? 'True' : 'False'}",
+                      "status": "${" + (dyn(schema.spec.resources).size() == 0 ? "true" : dyn(schema.spec.resources).map(r, dyn(r).id + ".ready()").join(" && ")) + " ? 'True' : 'False'}",
                       "reason": "Ready",
                       "observedGeneration": instance.metadata.generation,
                       "lastTransitionTime": instance.metadata.creationTimestamp
                     }
                   ]
-                }.merge(has(schema.spec.schema.status) ? schema.spec.schema.status : {})
-              }}]
+                }.merge(has(dyn(schema.spec.schema).status) ? dyn(schema.spec.schema).status : {})
+              }}])
             }
 
     - id: rgdStatus
@@ -210,7 +210,7 @@ spec:
           name: ${schema.metadata.name}
         status:
           state: Active
-          topologicalOrder: '${schema.spec.resources.map(r, r.id)}'
+          topologicalOrder: '${dyn(schema.spec.resources).map(r, dyn(r).id)}'
           # Minimal condition set for upstream compat. Tests check for:
           #   - Ready=True (root condition)
           #   - GraphAccepted=True

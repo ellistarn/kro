@@ -34,8 +34,11 @@ import (
 
 	krocel "github.com/kubernetes-sigs/kro/pkg/cel"
 	"github.com/kubernetes-sigs/kro/pkg/cel/conversion"
+	celunstructured "github.com/kubernetes-sigs/kro/pkg/cel/unstructured"
 	"github.com/kubernetes-sigs/kro/pkg/simpleschema"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	celopenapi "k8s.io/apiserver/pkg/cel/openapi"
+	"k8s.io/kube-openapi/pkg/validation/spec"
 )
 
 // ErrPending indicates that CEL evaluation failed because required data
@@ -149,6 +152,16 @@ type compiledGraph struct {
 	// must honor the same rewrite, otherwise empty-Watch `.ready()`
 	// reverts to vacuously-true on that path.
 	collectionIDs map[string]bool
+
+	// resourceSchemas maps node ID → resolved OpenAPI schema. Used at Eval
+	// time to wrap scope entries via UnstructuredToVal so schema-typed
+	// fields (e.g. Secret data values declared format:"byte") arrive in
+	// CEL as their declared runtime types (types.Bytes, not types.String).
+	// Without wrapping, the CEL type-checker sees bytes but the runtime
+	// value is still the raw base64 string, producing "no such overload:
+	// string(string)" on string(secret.data.key). Matches upstream's
+	// pkg/runtime/node_context.go buildContext.
+	resourceSchemas map[string]*spec.Schema
 }
 
 // eval evaluates a CEL expression against the given scope.
@@ -212,7 +225,7 @@ func (c *compiledGraph) eval(expr string, scope map[string]any) (any, error) {
 		}
 	}
 
-	out, _, err := prg.Eval(scope)
+	out, _, err := prg.Eval(c.wrapScope(scope))
 	if err != nil {
 		if isCELPending(err) {
 			return nil, fmt.Errorf("evaluating %q: %w: %w", expr, ErrPending, err)
@@ -226,6 +239,56 @@ func (c *compiledGraph) eval(expr string, scope map[string]any) (any, error) {
 	}
 
 	return native, nil
+}
+
+// wrapScope returns an activation map where scope entries for nodes with
+// resolved OpenAPI schemas are wrapped via UnstructuredToVal. Without this,
+// the CEL type-checker sees a Secret's data.key as bytes (format:"byte"),
+// but the runtime value arrives as the raw base64 string, so
+// string(secret.data.key) fails at runtime with "no such overload:
+// string(string)". Wrapping makes the runtime types match the declared
+// types.
+//
+// Wrapping is shallow and per-call: the original scope map is never
+// mutated, so hash inputs, previousScope retention, and serialization
+// paths still see plain map[string]any values. Only the final Activation
+// consumed by cel.Program.Eval sees ref.Val wrappers.
+//
+// Entries without a schema (definitions, unresolved CRDs, forEach
+// iterators, the readiness sidecar) pass through unchanged — CEL's
+// default type adapter handles them as before.
+//
+// Mirrors upstream's pkg/runtime/node_context.go buildContext.
+func (c *compiledGraph) wrapScope(scope map[string]any) map[string]any {
+	if len(c.resourceSchemas) == 0 {
+		return scope
+	}
+	wrapped := make(map[string]any, len(scope))
+	for k, v := range scope {
+		s, ok := c.resourceSchemas[k]
+		if !ok || s == nil {
+			wrapped[k] = v
+			continue
+		}
+		switch tv := v.(type) {
+		case map[string]any:
+			wrapped[k] = celunstructured.UnstructuredToVal(tv, &celopenapi.Schema{Schema: s})
+		case []any:
+			// Collection nodes: wrap each element with the item schema.
+			items := make([]any, len(tv))
+			for i, item := range tv {
+				if m, ok := item.(map[string]any); ok {
+					items[i] = celunstructured.UnstructuredToVal(m, &celopenapi.Schema{Schema: s})
+				} else {
+					items[i] = item
+				}
+			}
+			wrapped[k] = items
+		default:
+			wrapped[k] = v
+		}
+	}
+	return wrapped
 }
 
 // ---------------------------------------------------------------------------
@@ -325,8 +388,8 @@ func newInstanceState(compiled *compiledGraph) *instanceState {
 		forEachItemScope:       map[string]map[string]any{},
 		forEachItemKeys:        map[string]map[string][]string{},
 		driftTimers:            make(map[string]time.Time),
-		collectionCache:         make(map[string][]any),
-		collectionDirty:         make(map[string]bool),
+		collectionCache:        make(map[string][]any),
+		collectionDirty:        make(map[string]bool),
 		nodeReady:              make(map[string]bool),
 		systemErrorBackoff:     make(map[string]time.Duration),
 	}
@@ -665,15 +728,16 @@ func compileGraphSpec(spec *GraphSpec, typeInfo *typeSource) (*compiledGraph, er
 	declared[reservedNodeReadyVar] = true
 
 	return &compiledGraph{
-		specHash:       spec.Hash(),
-		env:            env,
-		programs:       programs,
-		exprPaths:      exprPaths,
-		declaredVars:   declared,
-		spec:           spec,
-		dag:            dag,
-		unresolvedGVKs: typeInfo.unresolvedGVKs,
+		specHash:        spec.Hash(),
+		env:             env,
+		programs:        programs,
+		exprPaths:       exprPaths,
+		declaredVars:    declared,
+		spec:            spec,
+		dag:             dag,
+		unresolvedGVKs:  typeInfo.unresolvedGVKs,
 		collectionIDs:   collectionIDs,
+		resourceSchemas: typeInfo.resourceSchemas,
 	}, nil
 }
 

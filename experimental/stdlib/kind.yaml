@@ -40,7 +40,7 @@ spec:
 
     - id: watchKinds
       includeWhen:
-        - ${has(kindCrd.status) && has(kindCrd.status.conditions) && kindCrd.status.conditions != null && kindCrd.status.conditions.exists(c, c.type == 'Established' && c.status == 'True')}
+        - ${has(kindCrd.status) && has(kindCrd.status.conditions) && kindCrd.status.conditions.exists(c, c.type == 'Established' && c.status == 'True')}
       # No metadata.namespace: watch Kinds across all namespaces
       # (k8s list/watch semantics — absent namespace = all).
       watch:
@@ -85,11 +85,11 @@ spec:
                       subresources:
                         status: {}
                       schema:
-                        openAPIV3Schema: $${simpleSchema.toOpenAPI(k.spec.schema, k.spec.nodes)}
+                        openAPIV3Schema: $${simpleSchema.toOpenAPI(dyn(k.spec.schema), dyn(k.spec.nodes))}
 
             - id: watchInstances
               includeWhen:
-                - $${has(crd.status) && has(crd.status.conditions) && crd.status.conditions != null && crd.status.conditions.exists(c, c.type == 'Established' && c.status == 'True')}
+                - $${has(crd.status) && has(crd.status.conditions) && crd.status.conditions.exists(c, c.type == 'Established' && c.status == 'True')}
               # No metadata.namespace: watch custom resource instances
               # across all namespaces (k8s list/watch semantics —
               # absent namespace = all).
@@ -113,23 +113,23 @@ spec:
                 spec:
                   nodes: >-
                     $${
-                      [{"id": "schema", "ref": {
+                      dyn([{"id": "schema", "ref": {
                         "apiVersion": k.spec.group + "/" + k.spec.version,
                         "kind": k.spec.kind,
                         "metadata": {
                           "name": instance.metadata.name,
                           "namespace": has(instance.metadata.namespace) ? instance.metadata.namespace : ""
                         }
-                      }}]
-                      + k.spec.nodes
-                      + (has(k.spec.schema.status) ? [{"id": "status", "patch": {
+                      }}])
+                      + dyn(k.spec.nodes)
+                      + dyn(has(dyn(k.spec.schema).status) ? [{"id": "status", "patch": {
                         "apiVersion": k.spec.group + "/" + k.spec.version,
                         "kind": k.spec.kind,
                         "metadata": {
                           "name": instance.metadata.name,
                           "namespace": has(instance.metadata.namespace) ? instance.metadata.namespace : ""
                         },
-                        "status": k.spec.schema.status
+                        "status": dyn(k.spec.schema).status
                       }}] : [])
                     }
 
@@ -141,4 +141,4 @@ spec:
                   name: $${k.metadata.name}
                   namespace: $${k.metadata.namespace}
                 status:
-                  ready: $${has(crd.status) && has(crd.status.conditions) && crd.status.conditions != null && crd.status.conditions.exists(c, c.type == 'Established' && c.status == 'True')}
+                  ready: $${has(crd.status) && has(crd.status.conditions) && crd.status.conditions.exists(c, c.type == 'Established' && c.status == 'True')}

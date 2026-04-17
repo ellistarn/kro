@@ -31,6 +31,10 @@ import (
 type typeSource struct {
 	// resourceSchemas maps node ID → OpenAPI schema for nodes with resolved GVKs.
 	resourceSchemas map[string]*spec.Schema
+	// resourceCollections marks resolved-schema node IDs whose CEL variable
+	// should be typed as list(element) rather than the element itself
+	// (Watch-class nodes expose a collection of observed objects).
+	resourceCollections map[string]bool
 	// definitionTypes maps node ID → inferred DeclType for definition nodes.
 	definitionTypes map[string]*apiservercel.DeclType
 	// forEachDefinitions tracks definition nodes that have forEach (scope is list, not object).
@@ -51,9 +55,10 @@ type typeSource struct {
 // The resolver may be nil — all resource nodes fall back to dyn.
 func resolveNodeTypes(nodes []Node, schemaResolver resolver.SchemaResolver) *typeSource {
 	ts := &typeSource{
-		resourceSchemas:    make(map[string]*spec.Schema),
-		definitionTypes:    make(map[string]*apiservercel.DeclType),
-		forEachDefinitions: make(map[string]bool),
+		resourceSchemas:     make(map[string]*spec.Schema),
+		resourceCollections: make(map[string]bool),
+		definitionTypes:     make(map[string]*apiservercel.DeclType),
+		forEachDefinitions:  make(map[string]bool),
 	}
 
 	// Track all identifiers that need CEL declarations.
@@ -75,23 +80,43 @@ func resolveNodeTypes(nodes []Node, schemaResolver resolver.SchemaResolver) *typ
 
 		case schemaResolver != nil && ref != NodeTypeDef:
 			// Phase 1: resolve schema for resource nodes with literal GVK.
-			gvk := extractLiteralGVK(node.Identity())
-			if gvk != nil {
-				s, err := schemaResolver.ResolveSchema(*gvk)
-				if err == nil && s != nil {
-					ts.resourceSchemas[node.ID] = s
-					if ref == NodeTypeWatch {
-						ts.listIDs = append(ts.listIDs, node.ID)
+			// On success, the node's identity variable is declared via the
+			// resourceSchemas → buildTypedEnvOptions path (cel.Variable
+			// with typed DeclType, list-wrapped for Watch collections).
+			// On failure (unresolved CRD, no literal GVK, resolver error),
+			// or when the node has forEach, fall through to dyn.
+			//
+			// forEach nodes stay dyn because the same variable appears in
+			// two runtime contexts with incompatible shapes: inside the
+			// per-item readyWhen the scope holds a single item (the
+			// coordinator swaps scope[nodeID] to the item map before
+			// evaluating each child, foreach.go § readyWhen), while
+			// sibling expressions see the collection. A typed single
+			// object breaks collection access (workers[0].ready()); a
+			// typed list breaks per-item field access
+			// (workers.data.ready). dyn accepts both.
+			resolved := false
+			if node.ForEach == nil {
+				gvk := extractLiteralGVK(node.Identity())
+				if gvk != nil {
+					s, err := schemaResolver.ResolveSchema(*gvk)
+					if err == nil && s != nil {
+						ts.resourceSchemas[node.ID] = s
+						if ref == NodeTypeWatch {
+							ts.resourceCollections[node.ID] = true
+						}
+						resolved = true
+					} else {
+						ts.unresolvedGVKs = append(ts.unresolvedGVKs, *gvk)
 					}
-					continue
 				}
-				// Resolution failed — track as unresolved, fall through to dyn.
-				ts.unresolvedGVKs = append(ts.unresolvedGVKs, *gvk)
 			}
-			if ref == NodeTypeWatch {
-				ts.listIDs = append(ts.listIDs, node.ID)
-			} else {
-				ts.untypedIDs = append(ts.untypedIDs, node.ID)
+			if !resolved {
+				if ref == NodeTypeWatch {
+					ts.listIDs = append(ts.listIDs, node.ID)
+				} else {
+					ts.untypedIDs = append(ts.untypedIDs, node.ID)
+				}
 			}
 
 		default:
@@ -130,7 +155,12 @@ func buildTypedEnvOptions(ts *typeSource) []cel.EnvOption {
 		typeName := krocel.TypeNamePrefix + id
 		declType = declType.MaybeAssignTypeName(typeName)
 		allDeclTypes = append(allDeclTypes, declType)
-		declarations = append(declarations, cel.Variable(id, declType.CelType()))
+		celType := declType.CelType()
+		if ts.resourceCollections[id] {
+			// Watch-class nodes expose list(element) in scope.
+			celType = cel.ListType(celType)
+		}
+		declarations = append(declarations, cel.Variable(id, celType))
 	}
 
 	// Definition types → DeclTypes from structural inference.

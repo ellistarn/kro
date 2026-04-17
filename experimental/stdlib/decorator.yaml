@@ -73,13 +73,13 @@ spec:
                 spec:
                   nodes: >-
                     $${
-                      [{"id": "item", "ref": {
+                      dyn([{"id": "item", "ref": {
                         "apiVersion": decorator.spec.watch.apiVersion,
                         "kind": decorator.spec.watch.kind,
                         "metadata": {
                           "name": item.metadata.name,
                           "namespace": has(item.metadata.namespace) ? item.metadata.namespace : ""
                         }
-                      }}]
-                      + decorator.spec.nodes
+                      }}])
+                      + dyn(decorator.spec.nodes)
                     }

@@ -52,17 +52,17 @@ spec:
         - s: ${singletons}
       def:
         name: ${s.metadata.name}
-        priority: ${s.spec.priority}
+        priority: ${dyn(s.spec).priority}
         identity: >-
-          ${s.spec.template.apiVersion + "/" + s.spec.template.kind + "/"
-            + s.spec.template.metadata.namespace + "/" + s.spec.template.metadata.name}
+          ${dyn(s.spec.template).apiVersion + "/" + dyn(s.spec.template).kind + "/"
+            + dyn(s.spec.template).metadata.namespace + "/" + dyn(s.spec.template).metadata.name}
 
     # This Singleton's target identity — same formula as identities.
     - id: identity
       def:
         value: >-
-          ${schema.spec.template.apiVersion + "/" + schema.spec.template.kind + "/"
-            + schema.spec.template.metadata.namespace + "/" + schema.spec.template.metadata.name}
+          ${dyn(schema.spec.template).apiVersion + "/" + dyn(schema.spec.template).kind + "/"
+            + dyn(schema.spec.template).metadata.namespace + "/" + dyn(schema.spec.template).metadata.name}
 
     # Peers — singletons targeting the same resource.
     - id: peers
