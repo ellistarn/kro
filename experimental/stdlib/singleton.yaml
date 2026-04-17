@@ -29,11 +29,20 @@ apiVersion: experimental.kro.run/v1alpha1
 kind: Kind
 metadata:
   name: singleton
-  namespace: kro-system
 spec:
   kind: Singleton
   group: experimental.kro.run
   version: v1alpha1
+  additionalPrinterColumns:
+    - name: Target
+      type: string
+      jsonPath: .spec.template.kind
+    - name: Priority
+      type: integer
+      jsonPath: .spec.priority
+    - name: Age
+      type: date
+      jsonPath: .metadata.creationTimestamp
   schema:
     spec:
       priority: integer | default=0

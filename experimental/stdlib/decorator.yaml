@@ -10,11 +10,17 @@ apiVersion: experimental.kro.run/v1alpha1
 kind: Kind
 metadata:
   name: decorator
-  namespace: kro-system
 spec:
   kind: Decorator
   group: experimental.kro.run
   version: v1alpha1
+  additionalPrinterColumns:
+    - name: Watches
+      type: string
+      jsonPath: .spec.watch.kind
+    - name: Age
+      type: date
+      jsonPath: .metadata.creationTimestamp
   schema:
     types:
       Node:
@@ -42,6 +48,7 @@ spec:
         kind: Graph
         metadata:
           name: decorator-${schema.metadata.namespace}-${schema.metadata.name}
+          namespace: kro-system
         spec:
           nodes:
             # Watch the Decorator to access its spec at L1.
