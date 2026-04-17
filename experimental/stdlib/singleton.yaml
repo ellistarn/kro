@@ -34,15 +34,19 @@ spec:
   group: experimental.kro.run
   version: v1alpha1
   additionalPrinterColumns:
-    - name: Target
+    - name: Claim
       type: string
-      jsonPath: .spec.template.kind
+      jsonPath: .status.claim
     - name: Priority
       type: integer
       jsonPath: .spec.priority
     - name: Active
       type: boolean
       jsonPath: .status.active
+    - name: ApiVersion
+      type: string
+      priority: 1
+      jsonPath: .spec.template.apiVersion
     - name: Age
       type: date
       jsonPath: .metadata.creationTimestamp
@@ -52,6 +56,7 @@ spec:
       template: object
     status:
       active: boolean
+      claim: string
   nodes:
     - id: singletons
       watch:
@@ -97,8 +102,11 @@ spec:
         - ${winner.name == schema.metadata.name}
       template: "${schema.spec.template}"
 
-    # Reflect Active onto the Singleton instance. Active == this
-    # Singleton is currently creating the target resource.
+    # Reflect Active + Claim onto the Singleton instance. Active ==
+    # this Singleton is currently creating the target resource. Claim
+    # is a human-readable identifier for the target, format
+    # "<apiVersion>/<kind> <namespace>/<name>" for namespaced targets,
+    # or "<apiVersion>/<kind> <name>" for cluster-scoped.
     - id: singletonStatus
       patch:
         apiVersion: ${schema.apiVersion}
@@ -108,3 +116,8 @@ spec:
           namespace: ${schema.metadata.namespace}
         status:
           active: ${winner.name == schema.metadata.name}
+          claim: >-
+            ${schema.spec.template.apiVersion + "/" + schema.spec.template.kind + " "
+              + (has(schema.spec.template.metadata.namespace) && schema.spec.template.metadata.namespace != ""
+                 ? schema.spec.template.metadata.namespace + "/" : "")
+              + schema.spec.template.metadata.name}
