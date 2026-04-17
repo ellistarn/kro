@@ -221,7 +221,7 @@ spec:
                       "lastTransitionTime": instance.metadata.creationTimestamp
                     }
                   ]
-                }.merge(has(schema.spec.schema.status) ? schema.spec.schema.status : {})
+                }
               }}]
             }
 

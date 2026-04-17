@@ -142,15 +142,6 @@ spec:
                         }
                       }}]
                       + k.spec.nodes
-                      + (has(k.spec.schema.status) ? [{"id": "status", "patch": {
-                        "apiVersion": k.spec.group + "/" + k.spec.version,
-                        "kind": k.spec.kind,
-                        "metadata": {
-                          "name": instance.metadata.name,
-                          "namespace": has(instance.metadata.namespace) ? instance.metadata.namespace : ""
-                        },
-                        "status": k.spec.schema.status
-                      }}] : [])
                     }
 
             - id: kindStatus
