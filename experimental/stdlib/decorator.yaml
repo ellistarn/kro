@@ -18,6 +18,9 @@ spec:
     - name: Watches
       type: string
       jsonPath: .spec.watch.kind
+    - name: Items
+      type: integer
+      jsonPath: .status.items
     - name: Age
       type: date
       jsonPath: .metadata.creationTimestamp
@@ -41,6 +44,8 @@ spec:
         kind: string
         selector: map[string]string
       nodes: "[]Node"
+    status:
+      items: integer
   nodes:
     - id: controllerGraph
       template:
@@ -90,3 +95,14 @@ spec:
                       }}]
                       + decorator.spec.nodes
                     }
+
+            # Reflect the count of matched items onto the Decorator instance.
+            - id: decoratorStatus
+              patch:
+                apiVersion: experimental.kro.run/v1alpha1
+                kind: Decorator
+                metadata:
+                  name: $${decorator.metadata.name}
+                  namespace: $${decorator.metadata.namespace}
+                status:
+                  items: $${items.size()}

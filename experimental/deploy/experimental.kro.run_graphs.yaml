@@ -24,6 +24,9 @@ spec:
         - name: Ready
           type: string
           jsonPath: .status.conditions[?(@.type=="Ready")].status
+        - name: Compiled
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Compiled")].status
         - name: Message
           type: string
           priority: 1

@@ -40,6 +40,9 @@ spec:
     - name: Priority
       type: integer
       jsonPath: .spec.priority
+    - name: Active
+      type: boolean
+      jsonPath: .status.active
     - name: Age
       type: date
       jsonPath: .metadata.creationTimestamp
@@ -47,6 +50,8 @@ spec:
     spec:
       priority: integer | default=0
       template: object
+    status:
+      active: boolean
   nodes:
     - id: singletons
       watch:
@@ -91,3 +96,15 @@ spec:
       includeWhen:
         - ${winner.name == schema.metadata.name}
       template: "${schema.spec.template}"
+
+    # Reflect Active onto the Singleton instance. Active == this
+    # Singleton is currently creating the target resource.
+    - id: singletonStatus
+      patch:
+        apiVersion: ${schema.apiVersion}
+        kind: ${schema.kind}
+        metadata:
+          name: ${schema.metadata.name}
+          namespace: ${schema.metadata.namespace}
+        status:
+          active: ${winner.name == schema.metadata.name}

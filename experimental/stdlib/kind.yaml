@@ -154,8 +154,6 @@ spec:
                     }
 
             - id: kindStatus
-              includeWhen:
-                - $${has(crd.status) && has(crd.status.conditions) && crd.status.conditions != null && crd.status.conditions.exists(c, c.type == 'Established' && c.status == 'True')}
               patch:
                 apiVersion: experimental.kro.run/v1alpha1
                 kind: Kind
