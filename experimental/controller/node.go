@@ -339,6 +339,15 @@ func (r *GraphReconciler) reconcileApply(ctx context.Context, graph *unstructure
 		return "", fmt.Errorf("%s %s: %w", nodeType, node.ID, err)
 	}
 
+	// Recursive child compilation: if the rendered template is a Graph CR,
+	// compile its spec before applying. Catches cycles, invalid expressions,
+	// and structural errors at the parent's reconcile time.
+	if nodeType == NodeTypeTemplate {
+		if err := r.validateChildGraph(evalMap); err != nil {
+			return "", fmt.Errorf("%s %s: child graph compilation failed: %w", nodeType, node.ID, err)
+		}
+	}
+
 	applied, err := r.applySSA(ctx, graph, evalMap, watcher, node.ID, nodeType, eval.effectiveGeneration, driftCorrection)
 	if err != nil {
 		return "", err
@@ -402,4 +411,22 @@ func removeFromCachedList(items []any, namespace, name string) []any {
 		filtered = append(filtered, item)
 	}
 	return filtered
+}
+
+// validateChildGraph checks if a rendered template is a Graph CR and, if so,
+// compiles its spec to catch errors (cycles, invalid expressions) before the
+// child is created. Returns nil for non-Graph CRs or valid Graph specs.
+func (r *GraphReconciler) validateChildGraph(evalMap map[string]any) error {
+	gvk := gvkFromMap(evalMap)
+	if gvk.Group != "experimental.kro.run" || gvk.Kind != "Graph" {
+		return nil
+	}
+	childSpec, err := extractGraphSpec(evalMap)
+	if err != nil {
+		return fmt.Errorf("extracting child spec: %w", err)
+	}
+	if _, err := compileGraphSpec(childSpec, nil); err != nil {
+		return err
+	}
+	return nil
 }
