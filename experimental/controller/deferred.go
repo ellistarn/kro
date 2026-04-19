@@ -80,11 +80,14 @@ func compileDeferredExpressions(spec *GraphSpec) error {
 			}
 		}
 
-		// Pre-compilation: if the template produces a Graph CR with a
-		// static node list, strip one deferral level and compile the
+		// Pre-compilation: if a forEach node's template produces a Graph CR
+		// with a static node list, strip one deferral level and compile the
 		// child spec. This catches expression errors, type errors, and
 		// DAG cycles in the child at the parent's compile time.
-		if body != nil && len(scope.nodeIDs) > 0 {
+		// Per 004-compilation.md § Recursive Compilation: "When a forEach
+		// template produces a child Graph CR..." — only forEach nodes trigger
+		// pre-compilation (they stamp N identical children from one template).
+		if body != nil && len(scope.nodeIDs) > 0 && node.ForEach != nil {
 			if err := precompileChildGraph(node.ID, body); err != nil {
 				return err
 			}
@@ -297,7 +300,9 @@ func stripDeferralLevel(v any) any {
 }
 
 // stripOneDollar strips one $ from each $${...} in a string.
-// ${...} (single $) is left unchanged.
+// ${...} (single $) is replaced with a placeholder literal — these are
+// parent-scope expressions that will be evaluated at reconcile time before
+// the child is stamped. Pre-compilation should not attempt to compile them.
 func stripOneDollar(s string) string {
 	var result strings.Builder
 	pos := 0
@@ -314,8 +319,10 @@ func stripOneDollar(s string) string {
 			result.WriteString(dollars[1:] + "{" + expr + "}")
 			changed = true
 		} else {
-			// ${...} stays as-is
-			result.WriteString(dollars + "{" + expr + "}")
+			// ${...} is a parent expression — replace with placeholder.
+			// At reconcile time this will be a concrete value.
+			result.WriteString("__kro_parent_expr__")
+			changed = true
 		}
 		pos = end
 	}

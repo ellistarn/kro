@@ -382,7 +382,7 @@ func TestStripDeferralLevel(t *testing.T) {
 
 	t.Run("preserves single dollar", func(t *testing.T) {
 		got := stripDeferralLevel("${expr}")
-		assert.Equal(t, "${expr}", got)
+		assert.Equal(t, "__kro_parent_expr__", got)
 	})
 
 	t.Run("strips one dollar from triple", func(t *testing.T) {
@@ -397,7 +397,7 @@ func TestStripDeferralLevel(t *testing.T) {
 
 	t.Run("handles mixed depth", func(t *testing.T) {
 		got := stripDeferralLevel("${parent}-$${child}")
-		assert.Equal(t, "${parent}-${child}", got)
+		assert.Equal(t, "__kro_parent_expr__-${child}", got)
 	})
 
 	t.Run("recurses into maps", func(t *testing.T) {

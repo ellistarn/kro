@@ -57,6 +57,10 @@ type typeSource struct {
 	// the type refinement pass. These variables are declared as the element
 	// type in the refined environment instead of dyn.
 	narrowedIterators map[string]*cel.Type
+	// dynamicGVKNodes lists node IDs whose apiVersion or kind contains a CEL
+	// expression. Per 004-compilation.md § Deferred Types: the type is
+	// unknowable until runtime.
+	dynamicGVKNodes []string
 }
 
 // resolveNodeTypes resolves types for all nodes in the spec.
@@ -109,6 +113,11 @@ func resolveNodeTypes(nodes []Node, schemaResolver resolver.SchemaResolver) *typ
 					} else {
 						ts.unresolvedGVKs = append(ts.unresolvedGVKs, *gvk)
 					}
+				} else if gvk == nil && node.HasDynamicGVR() {
+					// Per 004-compilation.md § Deferred Types: "Dynamic GVK nodes
+					// can't be typed at first compilation because the schema depends
+					// on runtime data." Record for reconcile-time staleness detection.
+					ts.dynamicGVKNodes = append(ts.dynamicGVKNodes, node.ID)
 				}
 			} else {
 				// forEach nodes: resolve schema for inner-scope readyWhen

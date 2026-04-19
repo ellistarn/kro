@@ -575,9 +575,15 @@ func (r *GraphReconciler) compileRevision(revision *unstructured.Unstructured) (
 	instanceKey := revision.GetNamespace() + "/" + revision.GetName()
 
 	// Fast path: instance state already exists with a valid compilation
-	// (steady-state reconcile).
+	// (steady-state reconcile). Check generation-based staleness per
+	// 004-compilation.md § Type Cache: "Staleness is one integer comparison."
 	if existing := r.Caches.get(instanceKey); existing != nil && existing.compiled != nil {
-		return existing.spec, existing, nil
+		if r.TypeCache == nil || existing.compiled.typeCacheGen >= r.TypeCache.Generation() {
+			return existing.spec, existing, nil
+		}
+		// Type cache generation advanced since this artifact was compiled.
+		// Fall through to recompile with updated schemas.
+		existing.compiled = nil
 	}
 
 	// Parse the spec.
@@ -592,12 +598,21 @@ func (r *GraphReconciler) compileRevision(revision *unstructured.Unstructured) (
 	// instances with different concrete values share one compiled graph.
 	compilationKey := spec.CompilationKey()
 	compiled := r.Caches.getCompiled(compilationKey)
+	// Validate the cached artifact is not stale (generation check).
+	if compiled != nil && r.TypeCache != nil && compiled.typeCacheGen < r.TypeCache.Generation() {
+		compiled = nil // stale — recompile
+	}
 	if compiled == nil {
-		// No shared compiled graph — compile from scratch.
+		// No shared compiled graph or stale — compile from scratch.
+		var cacheGen int64
+		if r.TypeCache != nil {
+			cacheGen = r.TypeCache.Generation()
+		}
 		compiled, err = compileGraphSpec(spec, resolveNodeTypes(spec.Nodes, r.SchemaResolver))
 		if err != nil {
 			return nil, nil, err
 		}
+		compiled.typeCacheGen = cacheGen
 	}
 
 	// Assemble a per-instance DAG from the shared topology and this

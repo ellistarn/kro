@@ -9,6 +9,8 @@ package graphcontroller
 import (
 	"math/rand"
 	"time"
+
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // instanceState holds the mutable reconcile-time state for a single Graph
@@ -61,6 +63,14 @@ type instanceState struct {
 	// On restart, all timers start fresh with random jitter.
 	// Per 005-reconciliation.md § Reconcile.
 	driftTimers map[string]time.Time
+
+	// resolvedDynamicGVKs maps node ID → last-resolved GVK for dynamic GVK nodes.
+	// Per 004-compilation.md § Deferred Types: "When the reconciler evaluates
+	// a dynamic GVK expression and gets a different type than what was compiled
+	// against, that node's compilation is stale." The reconciler updates this
+	// map after evaluating each dynamic GVK node and compares it on subsequent
+	// reconciles to detect staleness.
+	resolvedDynamicGVKs map[string]schema.GroupVersionKind
 
 	// collectionCache holds the cached full-object list per Watch node.
 	// Per 005-reconciliation.md § Propagation: "When a single resource

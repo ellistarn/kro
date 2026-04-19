@@ -137,6 +137,15 @@ type compiledGraph struct {
 	declaredVars   map[string]bool                   // variable names declared in the CEL env
 	topology       *dagTopology                      // shared DAG structure (immutable after BuildDAG)
 	unresolvedGVKs []schema.GroupVersionKind         // GVKs that fell back to dyn (triggers recompilation on CRD install)
+	// typeCacheGen records the type cache generation at compile time.
+	// Per 004-compilation.md § Type Cache: "Staleness is one integer comparison:
+	// current generation exceeds the artifact's recorded generation."
+	typeCacheGen int64
+	// dynamicGVKNodes lists node IDs whose apiVersion or kind contains a CEL
+	// expression. Per 004-compilation.md § Deferred Types: "the resolved GVK is
+	// also recorded per-node in the artifact." These nodes are compiled
+	// permissively; the reconciler detects GVK changes at runtime.
+	dynamicGVKNodes []string
 	// collectionIDs captures the set of Watch node IDs in this spec.
 	// Used by the dynamic-compile fallback to apply the same
 	// `<wk_id>.ready()` AST rewrite that the eager-compile path does —
@@ -611,6 +620,10 @@ func compileGraphSpec(spec *GraphSpec, typeInfo *typeSource) (*compiledGraph, er
 	declared[reservedNodeReadyVar] = true
 	declared[reservedDepsMapVar] = true
 
+	var dynamicGVKNodes []string
+	if typeInfo != nil {
+		dynamicGVKNodes = typeInfo.dynamicGVKNodes
+	}
 	return &compiledGraph{
 		compilationKey:  spec.CompilationKey(),
 		env:             env,
@@ -619,6 +632,7 @@ func compileGraphSpec(spec *GraphSpec, typeInfo *typeSource) (*compiledGraph, er
 		declaredVars:    declared,
 		topology:        dag.dagTopology,
 		unresolvedGVKs:  typeInfo.unresolvedGVKs,
+		dynamicGVKNodes: dynamicGVKNodes,
 		collectionIDs:   collectionIDs,
 		resourceSchemas: typeInfo.resourceSchemas,
 	}, nil
