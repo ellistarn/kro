@@ -612,10 +612,8 @@ func extractReferencedPathsFromNode(node Node, exprPaths map[string]map[string][
 	// Watch may still carry CEL expressions (e.g., a dynamic name
 	// from an upstream node).
 	var templateStrs []string
-	for _, body := range []map[string]any{node.Template, node.Patch, node.Ref, node.Watch, node.Def} {
-		if body != nil {
-			collectStrings(body, &templateStrs)
-		}
+	if body := node.Body(); body != nil {
+		collectStrings(body, &templateStrs)
 	}
 	if node.TemplateExpr != "" {
 		templateStrs = append(templateStrs, node.TemplateExpr)

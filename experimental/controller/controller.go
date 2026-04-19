@@ -775,7 +775,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 
 	eval := newEvaluator(state)
 	eval.effectiveGeneration = effectiveGeneration
-	dag := state.compiled.dag
+	dag := state.dag
 	plan := NewPlanState(dag)
 
 	// Determine which nodes are triggered this reconcile.
@@ -1299,7 +1299,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 			}
 			// Compile superseded revisions to access their finalizer relationships.
 			if _, revState, compileErr := r.compileRevision(rev); compileErr == nil {
-				supersededDAGs[rev.GetName()] = revState.compiled.dag
+				supersededDAGs[rev.GetName()] = revState.dag
 			}
 		}
 

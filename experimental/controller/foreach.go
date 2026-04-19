@@ -435,6 +435,9 @@ func (r *GraphReconciler) reconcileForEach(ctx context.Context, graph *unstructu
 	// Record updated state for coordinator to merge back.
 	eval.forEachNewScope[node.ID] = newItemScope
 	eval.forEachNewKeys[node.ID] = newItemKeys
+	if eval.forEachNewHashes == nil {
+		eval.forEachNewHashes = map[string]map[string]string{}
+	}
 	eval.forEachNewHashes[node.ID] = newItemHashes
 
 	// Record updated collection for next reconcile's diff.

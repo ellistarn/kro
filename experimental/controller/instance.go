@@ -18,6 +18,13 @@ import (
 type instanceState struct {
 	compiled *compiledGraph
 
+	// Per-instance spec and DAG. The compiled graph is shared across instances
+	// with the same compilation key; the spec and DAG contain per-instance
+	// node bodies (template maps with concrete values).
+	// Per 004-compilation.md § Structural Compilation Caching.
+	spec *GraphSpec
+	dag  *DAG
+
 	// State retained across reconciles for propagateWhen and forEach diffing.
 	previousScope      map[string]any       // node ID → last scope data
 	previousKeys       map[string][]string  // node ID → last applied keys

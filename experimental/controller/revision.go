@@ -577,7 +577,7 @@ func (r *GraphReconciler) compileRevision(revision *unstructured.Unstructured) (
 	// Fast path: instance state already exists with a valid compilation
 	// (steady-state reconcile).
 	if existing := r.Caches.get(instanceKey); existing != nil && existing.compiled != nil {
-		return existing.compiled.spec, existing, nil
+		return existing.spec, existing, nil
 	}
 
 	// Parse the spec.
@@ -586,9 +586,12 @@ func (r *GraphReconciler) compileRevision(revision *unstructured.Unstructured) (
 		return nil, nil, err
 	}
 
-	// Check for a shared compiled graph by spec hash.
-	specHash := spec.Hash()
-	compiled := r.Caches.getCompiled(specHash)
+	// Check for a shared compiled graph by compilation key.
+	// The compilation key hashes only compilation-relevant inputs (expressions,
+	// node IDs, types, conditions) — not concrete values. This means N forEach
+	// instances with different concrete values share one compiled graph.
+	compilationKey := spec.CompilationKey()
+	compiled := r.Caches.getCompiled(compilationKey)
 	if compiled == nil {
 		// No shared compiled graph — compile from scratch.
 		compiled, err = compileGraphSpec(spec, resolveNodeTypes(spec.Nodes, r.SchemaResolver))
@@ -596,6 +599,12 @@ func (r *GraphReconciler) compileRevision(revision *unstructured.Unstructured) (
 			return nil, nil, err
 		}
 	}
+
+	// Assemble a per-instance DAG from the shared topology and this
+	// instance's node specs. The topology (sort order, edges, levels)
+	// is a compilation artifact shared across instances; the nodes contain
+	// per-instance concrete values.
+	dag := assembleDAG(spec.Nodes, compiled.topology)
 
 	// Check if this is an evicted instance (compiled was nil'd by
 	// evictUnresolved). The per-node mutable state is valid across
@@ -610,6 +619,8 @@ func (r *GraphReconciler) compileRevision(revision *unstructured.Unstructured) (
 	if existing := r.Caches.get(instanceKey); existing != nil {
 		// existing.compiled is nil (evicted). Recompile in-place.
 		existing.compiled = compiled
+		existing.spec = spec
+		existing.dag = dag
 		// Reset runtime caches that should not survive recompilation.
 		// Per-node state (hashes, scopes, references, drift timers,
 		// applied keys) is preserved — node structure is unchanged.
@@ -628,6 +639,8 @@ func (r *GraphReconciler) compileRevision(revision *unstructured.Unstructured) (
 
 	// New instance — create fresh mutable state.
 	state := newInstanceState(compiled)
+	state.spec = spec
+	state.dag = dag
 	r.Caches.set(instanceKey, state)
 	return spec, state, nil
 }
