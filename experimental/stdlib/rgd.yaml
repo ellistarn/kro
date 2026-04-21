@@ -109,8 +109,6 @@ spec:
                     ? {"valid": false, "message": "forEach iterator is a reserved keyword"}
                     : checks.resources.exists(r, has(r.forEach) && r.forEach.size() > 0 && r.forEach.exists(d, d.exists(k, checks.allIDs.exists(id, id == k))))
                     ? {"valid": false, "message": "forEach iterator conflicts with resource ID"}
-                    : has(schema.spec) && has(schema.spec.schema) && has(schema.spec.schema.spec) && checks.resources.exists(r, has(r.forEach) && r.forEach.size() > 0 && r.forEach.exists(d, d.exists(iterName, string(d[iterName]).matches("^\\$\\{schema\\.spec\\.[a-zA-Z0-9]+\\}$") && schema.spec.schema.spec.exists(field, "${schema.spec." + field + "}" == string(d[iterName]) && !string(schema.spec.schema.spec[field]).startsWith("[]")))))
-                    ? {"valid": false, "message": "forEach expression must return a list"}
                     : has(schema.spec) && has(schema.spec.schema) && has(schema.spec.schema.status) && schema.spec.schema.status.size() > 0 && schema.spec.schema.status.exists(k, !string(schema.spec.schema.status[k]).contains("${"))
                     ? {"valid": false, "message": "failed to build instance status schema: status fields without expressions are not supported"}
                     : {"valid": true, "message": ""}

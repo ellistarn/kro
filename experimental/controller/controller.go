@@ -793,7 +793,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	// -----------------------------------------------------------------------
 
 	// Parse and compile the active revision's spec (cached by revision name).
-	revisionSpec, state, err := r.compileRevision(activeRevision)
+	revisionSpec, state, err := r.compileRevision(ctx, graph.GetNamespace(), activeRevision)
 	if err != nil {
 		if statusErr := r.updateStatus(ctx, graph, &reconcileState{compiled: false, compiledErr: err}); statusErr != nil {
 			logger.Error(statusErr, "updating status after compilation error")
@@ -988,6 +988,16 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	// dependencies are satisfied. Workers are pure functions — they receive
 	// a read-only scope snapshot and return results. The coordinator is the
 	// single writer to shared state (scope, plan, applied keys).
+	//
+	// Record the schema generation before the walk. If a CRD is created
+	// during node reconciliation (e.g., the `crd` template node), the
+	// generation advances. After the walk, we re-validate compilation to
+	// catch child graph type errors immediately — without waiting for a
+	// second reconcile cycle.
+	var preWalkGen int64
+	if r.SchemaGen != nil {
+		preWalkGen = r.SchemaGen.Generation()
+	}
 	walk := &walkState{
 		r:                    r,
 		ctx:                  ctx,
@@ -1265,6 +1275,19 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	nodeErrors := walk.nodeErrors
 	var nodeNotes []string // informational messages (e.g., FinalizerSkipped) routed to status without gating Ready
 
+	// If the schema generation advanced during the walk (a CRD was created
+	// by a template node), re-validate compilation immediately. The schema
+	// resolver can now resolve types that were dyn at the start of this
+	// reconcile. This catches child graph type errors (e.g., forEach over a
+	// non-list field) within the same cycle that creates the CRD, rather
+	// than waiting for the next reconcile to detect staleness.
+	if r.SchemaGen != nil && r.SchemaGen.Generation() > preWalkGen && compilationErr == nil {
+		if _, _, err := r.compileRevision(ctx, graph.GetNamespace(), activeRevision); err != nil {
+			compilationErr = err
+			logger.Error(err, "post-walk recompilation detected error")
+		}
+	}
+
 	// Derive aggregate state from the DAG plan
 	summary := plan.Summary()
 
@@ -1338,7 +1361,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 				}
 			}
 			// Compile superseded revisions to access their finalizer relationships.
-			if _, revState, compileErr := r.compileRevision(rev); compileErr == nil {
+			if _, revState, compileErr := r.compileRevision(ctx, graph.GetNamespace(), rev); compileErr == nil {
 				supersededDAGs[rev.GetName()] = revState.dag
 			}
 		}
