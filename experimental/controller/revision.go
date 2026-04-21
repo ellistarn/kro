@@ -17,7 +17,6 @@ package graphcontroller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -617,22 +616,16 @@ func (r *GraphReconciler) precompileExpressionChildGraphs(ctx context.Context, g
 		// Parse and compile the child graph spec.
 		childNodes, err := parseNodeList(nodeList)
 		if err != nil {
-			// Parse errors (invalid IDs, duplicates, forEach conflicts) are
-			// caught by the runtime validation node with user-facing messages.
-			// Pre-compilation only needs successful parsing for cycle detection,
-			// so skip gracefully when parsing fails.
-			continue
+			// Parse errors (invalid IDs, duplicates, reserved keywords,
+			// forEach conflicts, invalid apiVersion) surface directly.
+			return fmt.Errorf("node %q: child graph: %w", node.ID, err)
 		}
 		childSpec := &GraphSpec{Nodes: childNodes}
 		if _, err := compileGraphSpec(childSpec, nil); err != nil {
-			// Only surface cycle errors (DependencyError). Other compilation
-			// errors (expression validation, label keys, type errors) are
-			// caught by the runtime validation node in rgd.yaml which
-			// produces user-facing error messages. Pre-compilation's purpose
-			// is cycle detection — don't hijack the validation path.
-			if errors.Is(err, ErrDependencyError) {
-				return fmt.Errorf("node %q: child graph: %w", node.ID, err)
-			}
+			// All compilation errors surface — cycles, expression
+			// validation, type errors, etc. The compiler is the single
+			// source of truth for structural correctness.
+			return fmt.Errorf("node %q: child graph: %w", node.ID, err)
 		}
 	}
 	return nil

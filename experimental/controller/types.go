@@ -7,10 +7,15 @@ package graphcontroller
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/util/validation"
 )
+
+// apiVersionRe matches valid Kubernetes apiVersion strings: either a bare
+// version (e.g., "v1") or "group/version" (e.g., "apps/v1", "kro.run/v1alpha1").
+var apiVersionRe = regexp.MustCompile(`^([a-zA-Z0-9][a-zA-Z0-9.-]*/)?v[0-9]+([a-z]+[0-9]+)?$`)
 
 // NodeType classifies a Graph node by the keyword the user declares. Each
 // keyword names a distinct ownership and cleanup contract:
@@ -448,6 +453,21 @@ func parseNodeList(raw any) ([]Node, error) {
 	// "The node ID is lowercased when embedded in the identity label key;
 	// IDs that collide after lowercasing are rejected at compile time."
 	seenLower := make(map[string]string, len(list)) // lowercased → original
+	// Reserved words that must not be used as node IDs or forEach iterator
+	// variable names. Limited to CEL language keywords and internal scope
+	// variables that would cause actual conflicts. Application-level
+	// conventions (like "schema", "instance") are not included — they are
+	// valid node IDs used by stdlib graphs.
+	reservedWords := map[string]bool{
+		// CEL language keywords
+		"true": true, "false": true, "null": true, "in": true,
+		"as": true, "break": true, "const": true, "continue": true,
+		"else": true, "for": true, "function": true, "if": true,
+		"import": true, "let": true, "loop": true, "package": true,
+		"return": true, "var": true, "void": true, "while": true,
+		// Graph controller internal scope variables
+		"self": true,
+	}
 	// First pass: collect all node IDs (lowercased) so the forEach
 	// variable collision check can catch collisions with nodes declared
 	// anywhere in the list, not just those parsed so far. Both node IDs
@@ -485,8 +505,13 @@ func parseNodeList(raw any) ([]Node, error) {
 		if errs := validation.IsDNS1123Label(strings.ToLower(id)); len(errs) > 0 {
 			return nil, fmt.Errorf("node[%d] %q: invalid DNS subdomain segment for identity label key: %s", i, id, strings.Join(errs, "; "))
 		}
+		// Reserved words must not be used as node IDs — they shadow built-in
+		// scope variables or CEL keywords.
+		if reservedWords[strings.ToLower(id)] {
+			return nil, fmt.Errorf("node[%d] %q: naming convention violation: id %s is a reserved keyword", i, id, id)
+		}
 		if seen[id] {
-			return nil, fmt.Errorf("node[%d]: duplicate id %q", i, id)
+			return nil, fmt.Errorf("node[%d]: found duplicate resource IDs %q", i, id)
 		}
 		lower := strings.ToLower(id)
 		if orig, exists := seenLower[lower]; exists && orig != id {
@@ -568,14 +593,18 @@ func parseNodeList(raw any) ([]Node, error) {
 			return nil, fmt.Errorf("node[%d] %q: forEach must be a map or array, got %T", i, id, m["forEach"])
 		}
 		if node.ForEach != nil {
+			// Validate: forEach iterator variable names must not be reserved keywords.
+			varLower := strings.ToLower(node.ForEach.VarName)
+			if reservedWords[varLower] {
+				return nil, fmt.Errorf("node[%d] %q: forEach iterator %q is a reserved keyword", i, id, node.ForEach.VarName)
+			}
 			// Validate: forEach iterator variable names must not collide
 			// with any node ID in the graph (case-insensitive). Both enter the
 			// same CEL scope, so a collision would shadow the node. The check
 			// uses allNodeIDs (collected in the first pass above) rather than
 			// `seen` to catch collisions with nodes declared later in the list.
-			varLower := strings.ToLower(node.ForEach.VarName)
 			if collidingID, exists := allNodeIDsLower[varLower]; exists {
-				return nil, fmt.Errorf("node[%d] %q: forEach variable %q collides with node ID %q (both enter CEL scope)", i, id, node.ForEach.VarName, collidingID)
+				return nil, fmt.Errorf("node[%d] %q: forEach iterator %q conflicts with resource ID %q", i, id, node.ForEach.VarName, collidingID)
 			}
 		}
 		// Validate: finalizes nodes must not have CEL-evaluated names unless
@@ -730,6 +759,15 @@ func validateTemplate(tmpl map[string]any) error {
 	}
 	if _, ok := tmpl["kind"]; !ok {
 		return fmt.Errorf("template: missing kind")
+	}
+	// Validate apiVersion format when it's a literal string (not a CEL
+	// expression). Must be either "version" (e.g., "v1") or "group/version"
+	// (e.g., "apps/v1"). The version must match v\d+(\w+\d+)? (e.g., v1,
+	// v1alpha1, v1beta2).
+	if av, ok := tmpl["apiVersion"].(string); ok && !strings.Contains(av, "${") {
+		if !apiVersionRe.MatchString(av) {
+			return fmt.Errorf("template: invalid apiVersion %q: must be \"version\" or \"group/version\" (e.g., v1, apps/v1)", av)
+		}
 	}
 	return nil
 }
