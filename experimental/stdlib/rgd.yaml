@@ -1,8 +1,10 @@
 # ResourceGraphDefinition Controller
 #
-# Raw Graph that implements the RGD type. Validation runs in the parent
-# graph (rgd-controller) and gates sub-Graph creation. The rgdPatch node
-# is the single writer for Ready, state, and Compiled on the RGD.
+# Raw Graph that implements the RGD type. Each RGD gets a sub-Graph
+# (created by the rgds forEach) that handles validation and CRD creation.
+# The sub-Graph's rgdStatus node is the single writer for Ready, state,
+# GraphAccepted, KindReady, and ControllerReady on the RGD — keeping
+# the status pipeline to a single hop for fast convergence.
 ---
 apiVersion: experimental.kro.run/v1alpha1
 kind: Graph
@@ -71,6 +73,13 @@ spec:
           namespace: kro-system
           labels:
             kro.run/instance-name: ${rgd.metadata.name}
+          ownerReferences:
+            - apiVersion: kro.run/v1alpha1
+              kind: ResourceGraphDefinition
+              name: ${rgd.metadata.name}
+              uid: ${rgd.metadata.uid}
+              controller: true
+              blockOwnerDeletion: true
         spec:
           nodes:
             - id: schema
@@ -82,8 +91,9 @@ spec:
 
             - id: checks
               def:
-                resources: '$${has(schema.spec.resources) ? schema.spec.resources : []}'
+                resources: '$${has(schema.spec) && has(schema.spec.resources) ? schema.spec.resources : []}'
                 reserved: '$${["apiVersion","context","dependency","dependencies","each","externalRef","externalReference","externalRefs","externalReferences","graph","instance","item","items","kind","kro","metadata","namespace","object","resource","resourcegraphdefinition","resourceGraphDefinition","resources","root","runtime","schema","self","serviceAccountName","spec","status","this","variables","vars","version"]}'
+                allIDs: '$${has(schema.spec) && has(schema.spec.resources) ? schema.spec.resources.map(r, r.id) : []}'
 
             - id: validation
               def:
@@ -93,7 +103,13 @@ spec:
                     ? {"valid": false, "message": "naming convention violation: id " + checks.resources.filter(r, checks.reserved.exists(w, r.id == w))[0].id + " is a reserved keyword in KRO"}
                     : checks.resources.exists(r, !r.id.matches("^[a-z][a-zA-Z0-9]*$"))
                     ? {"valid": false, "message": "naming convention violation: id " + checks.resources.filter(r, !r.id.matches("^[a-z][a-zA-Z0-9]*$"))[0].id + " is not a valid KRO resource id: must be lower camelCase"}
-                    : has(schema.spec.schema.status) && schema.spec.schema.status.size() > 0 && schema.spec.schema.status.exists(k, !string(schema.spec.schema.status[k]).contains("${"))
+                    : checks.resources.exists(r, checks.resources.filter(s, s.id == r.id).size() > 1)
+                    ? {"valid": false, "message": "found duplicate resource IDs \"" + checks.resources.filter(r, checks.resources.filter(s, s.id == r.id).size() > 1)[0].id + "\""}
+                    : checks.resources.exists(r, has(r.forEach) && r.forEach.size() > 0 && r.forEach.exists(d, d.exists(k, checks.reserved.exists(w, k == w))))
+                    ? {"valid": false, "message": "forEach iterator is a reserved keyword"}
+                    : checks.resources.exists(r, has(r.forEach) && r.forEach.size() > 0 && r.forEach.exists(d, d.exists(k, checks.allIDs.exists(id, id == k))))
+                    ? {"valid": false, "message": "forEach iterator conflicts with resource ID"}
+                    : has(schema.spec) && has(schema.spec.schema) && has(schema.spec.schema.status) && schema.spec.schema.status.size() > 0 && schema.spec.schema.status.exists(k, !string(schema.spec.schema.status[k]).contains("${"))
                     ? {"valid": false, "message": "failed to build instance status schema: status fields without expressions are not supported"}
                     : {"valid": true, "message": ""}
                   }
@@ -234,14 +250,22 @@ spec:
             - id: rgdStatus
               propagateWhen:
                 - '$${!validation.result.valid || crd.ready()}'
+              forceApply: true
               patch:
                 apiVersion: kro.run/v1alpha1
                 kind: ResourceGraphDefinition
                 metadata:
                   name: $${schema.metadata.name}
                 status:
+                  state: '$${validation.result.valid ? "Active" : "Inactive"}'
                   topologicalOrder: '$${validation.result.valid ? (has(schema.spec.resources) ? schema.spec.resources.map(r, r.id) : []) : []}'
                   conditions:
+                    - type: Ready
+                      status: '$${validation.result.valid ? "True" : "False"}'
+                      reason: '$${validation.result.valid ? "Ready" : "Invalid"}'
+                      message: '$${validation.result.valid ? "" : validation.result.message}'
+                      observedGeneration: $${schema.metadata.generation}
+                      lastTransitionTime: $${schema.metadata.creationTimestamp}
                     - type: GraphAccepted
                       status: '$${validation.result.valid ? "True" : "False"}'
                       reason: '$${validation.result.valid ? "Valid" : "Invalid"}'
@@ -261,65 +285,71 @@ spec:
                       observedGeneration: $${schema.metadata.generation}
                       lastTransitionTime: $${schema.metadata.creationTimestamp}
 
-    # Single writer for Ready and state on the RGD. Reduces validation
-    # (computed here from rgd.spec) and compilation (from sub-Graph
-    # status, written to RGD by compiledCondition) into one patch.
-    - id: rgdPatch
+    # compilationStatus mirrors the sub-Graph's Compiled condition to the RGD.
+    # When compilation fails, this node also claims Ready and state (with
+    # Inactive / False) because the sub-Graph is inert and rgdStatus can't
+    # fire. When compilation succeeds, the patch includes only Compiled —
+    # SSA relinquishes Ready and state for rgdStatus to claim.
+    - id: compilationStatus
       forEach:
-        - rgd: ${watchRgds}
+        - graph: ${rgds}
       forceApply: true
-      patch:
-        apiVersion: kro.run/v1alpha1
-        kind: ResourceGraphDefinition
-        metadata:
-          name: ${rgd.metadata.name}
-        status:
-          state: >-
-            ${(has(rgd.spec.resources) ? rgd.spec.resources : []).exists(r,
-              ["apiVersion","context","dependency","dependencies","each","externalRef","externalReference","externalRefs","externalReferences","graph","instance","item","items","kind","kro","metadata","namespace","object","resource","resourcegraphdefinition","resourceGraphDefinition","resources","root","runtime","schema","self","serviceAccountName","spec","status","this","variables","vars","version"].exists(w, r.id == w)
-              || !r.id.matches("^[a-z][a-zA-Z0-9]*$"))
-            || (has(rgd.spec.schema.status) && rgd.spec.schema.status.size() > 0 && rgd.spec.schema.status.exists(k, !string(rgd.spec.schema.status[k]).contains("${")))
-            ? "Inactive"
-            : has(rgd.status) && has(rgd.status.conditions) && rgd.status.conditions.exists(c, c.type == "Compiled" && c.status == "False")
-            ? "Inactive"
-            : has(rgd.status) && has(rgd.status.conditions) && rgd.status.conditions.exists(c, c.type == "Compiled" && c.status == "True")
-            ? "Active"
-            : "Inactive"}
-          conditions:
-            - type: Ready
-              status: >-
-                ${(has(rgd.spec.resources) ? rgd.spec.resources : []).exists(r,
-                  ["apiVersion","context","dependency","dependencies","each","externalRef","externalReference","externalRefs","externalReferences","graph","instance","item","items","kind","kro","metadata","namespace","object","resource","resourcegraphdefinition","resourceGraphDefinition","resources","root","runtime","schema","self","serviceAccountName","spec","status","this","variables","vars","version"].exists(w, r.id == w)
-                  || !r.id.matches("^[a-z][a-zA-Z0-9]*$"))
-                || (has(rgd.spec.schema.status) && rgd.spec.schema.status.size() > 0 && rgd.spec.schema.status.exists(k, !string(rgd.spec.schema.status[k]).contains("${")))
-                ? "False"
-                : has(rgd.status) && has(rgd.status.conditions) && rgd.status.conditions.exists(c, c.type == "Compiled" && c.status == "False")
-                ? "False"
-                : has(rgd.status) && has(rgd.status.conditions) && rgd.status.conditions.exists(c, c.type == "Compiled" && c.status == "True")
-                ? "True"
-                : "False"}
-              reason: >-
-                ${(has(rgd.spec.resources) ? rgd.spec.resources : []).exists(r,
-                  ["apiVersion","context","dependency","dependencies","each","externalRef","externalReference","externalRefs","externalReferences","graph","instance","item","items","kind","kro","metadata","namespace","object","resource","resourcegraphdefinition","resourceGraphDefinition","resources","root","runtime","schema","self","serviceAccountName","spec","status","this","variables","vars","version"].exists(w, r.id == w)
-                  || !r.id.matches("^[a-z][a-zA-Z0-9]*$"))
-                ? "Invalid"
-                : (has(rgd.spec.schema.status) && rgd.spec.schema.status.size() > 0 && rgd.spec.schema.status.exists(k, !string(rgd.spec.schema.status[k]).contains("${")))
-                ? "Invalid"
-                : has(rgd.status) && has(rgd.status.conditions) && rgd.status.conditions.exists(c, c.type == "Compiled" && c.status == "False")
-                ? "CompilationFailed"
-                : has(rgd.status) && has(rgd.status.conditions) && rgd.status.conditions.exists(c, c.type == "Compiled" && c.status == "True")
-                ? "Ready"
-                : "Reconciling"}
-              message: >-
-                ${(has(rgd.spec.resources) ? rgd.spec.resources : []).exists(r,
-                  ["apiVersion","context","dependency","dependencies","each","externalRef","externalReference","externalRefs","externalReferences","graph","instance","item","items","kind","kro","metadata","namespace","object","resource","resourcegraphdefinition","resourceGraphDefinition","resources","root","runtime","schema","self","serviceAccountName","spec","status","this","variables","vars","version"].exists(w, r.id == w))
-                ? "naming convention violation: id " + (has(rgd.spec.resources) ? rgd.spec.resources : []).filter(r, ["apiVersion","context","dependency","dependencies","each","externalRef","externalReference","externalRefs","externalReferences","graph","instance","item","items","kind","kro","metadata","namespace","object","resource","resourcegraphdefinition","resourceGraphDefinition","resources","root","runtime","schema","self","serviceAccountName","spec","status","this","variables","vars","version"].exists(w, r.id == w))[0].id + " is a reserved keyword in KRO"
-                : (has(rgd.spec.resources) ? rgd.spec.resources : []).exists(r, !r.id.matches("^[a-z][a-zA-Z0-9]*$"))
-                ? "naming convention violation: id " + (has(rgd.spec.resources) ? rgd.spec.resources : []).filter(r, !r.id.matches("^[a-z][a-zA-Z0-9]*$"))[0].id + " is not a valid KRO resource id: must be lower camelCase"
-                : (has(rgd.spec.schema.status) && rgd.spec.schema.status.size() > 0 && rgd.spec.schema.status.exists(k, !string(rgd.spec.schema.status[k]).contains("${")))
-                ? "failed to build instance status schema: status fields without expressions are not supported"
-                : has(rgd.status) && has(rgd.status.conditions) && rgd.status.conditions.exists(c, c.type == "Compiled" && c.status == "False")
-                ? rgd.status.conditions.filter(c, c.type == "Compiled")[0].message
-                : has(rgd.status) && has(rgd.status.conditions) && rgd.status.conditions.exists(c, c.type == "Compiled" && c.status == "True")
-                ? "resource graph and schema are valid"
-                : "Waiting for graph compilation"}
+      patch: >-
+        ${
+          has(graph.status) && has(graph.status.conditions)
+          && graph.status.conditions.exists(c, c.type == "Compiled" && c.status == "False")
+          ? {
+              "apiVersion": "kro.run/v1alpha1",
+              "kind": "ResourceGraphDefinition",
+              "metadata": {"name": graph.metadata.labels["kro.run/instance-name"]},
+              "status": {
+                "state": "Inactive",
+                "conditions": [
+                  {
+                    "type": "Compiled",
+                    "status": "False",
+                    "reason": graph.status.conditions.filter(c, c.type == "Compiled")[0].reason,
+                    "message": graph.status.conditions.filter(c, c.type == "Compiled")[0].message
+                  },
+                  {
+                    "type": "Ready",
+                    "status": "False",
+                    "reason": "CompilationFailed",
+                    "message": graph.status.conditions.filter(c, c.type == "Compiled")[0].message
+                  }
+                ]
+              }
+            }
+          : has(graph.status) && has(graph.status.conditions)
+            && graph.status.conditions.exists(c, c.type == "Compiled" && c.status == "True")
+          ? {
+              "apiVersion": "kro.run/v1alpha1",
+              "kind": "ResourceGraphDefinition",
+              "metadata": {"name": graph.metadata.labels["kro.run/instance-name"]},
+              "status": {
+                "conditions": [
+                  {
+                    "type": "Compiled",
+                    "status": "True",
+                    "reason": "Compiled",
+                    "message": "Spec is valid"
+                  }
+                ]
+              }
+            }
+          : {
+              "apiVersion": "kro.run/v1alpha1",
+              "kind": "ResourceGraphDefinition",
+              "metadata": {"name": graph.metadata.labels["kro.run/instance-name"]},
+              "status": {
+                "conditions": [
+                  {
+                    "type": "Compiled",
+                    "status": "Unknown",
+                    "reason": "Reconciling",
+                    "message": "Waiting for graph compilation"
+                  }
+                ]
+              }
+            }
+        }

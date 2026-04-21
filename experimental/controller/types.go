@@ -10,11 +10,15 @@ import (
 	"regexp"
 	"strings"
 
-	"k8s.io/apimachinery/pkg/util/validation"
+
 )
 
+// nodeIDRe matches valid node IDs: lower camelCase identifiers.
+// Must start with a lowercase letter, followed by alphanumeric characters.
+var nodeIDRe = regexp.MustCompile(`^[a-z][a-zA-Z0-9]*$`)
+
 // apiVersionRe matches valid Kubernetes apiVersion strings: either a bare
-// version (e.g., "v1") or "group/version" (e.g., "apps/v1", "kro.run/v1alpha1").
+// version (v1, v1alpha1) or group/version (apps/v1, kro.run/v1alpha1).
 var apiVersionRe = regexp.MustCompile(`^([a-zA-Z0-9][a-zA-Z0-9.-]*/)?v[0-9]+([a-z]+[0-9]+)?$`)
 
 // NodeType classifies a Graph node by the keyword the user declares. Each
@@ -493,17 +497,11 @@ func parseNodeList(raw any) ([]Node, error) {
 		if !ok || id == "" {
 			return nil, fmt.Errorf("node[%d]: missing or empty id", i)
 		}
-		// Per 001-graph.md: "Hyphens are not allowed — they are parsed as
-		// subtraction by the CEL evaluator (e.g., my-app is my minus app)."
-		if strings.Contains(id, "-") {
-			return nil, fmt.Errorf("node[%d] %q: hyphens are not allowed in node IDs (parsed as subtraction by CEL)", i, id)
-		}
-		// Node IDs are embedded in identity label key prefixes as DNS
-		// subdomain segments. Reject IDs that would produce invalid DNS
-		// subdomains (e.g., underscores, spaces). This catches the entire
-		// class of invalid characters rather than enumerating them.
-		if errs := validation.IsDNS1123Label(strings.ToLower(id)); len(errs) > 0 {
-			return nil, fmt.Errorf("node[%d] %q: invalid DNS subdomain segment for identity label key: %s", i, id, strings.Join(errs, "; "))
+		// Per 001-graph.md: node IDs must be lower camelCase identifiers.
+		// This check subsumes hyphen, underscore, uppercase-first, digit-first,
+		// and special-character rejections in a single regex.
+		if !nodeIDRe.MatchString(id) {
+			return nil, fmt.Errorf("node[%d] %q: naming convention violation: id %s is not a valid KRO resource id: must be lower camelCase", i, id, id)
 		}
 		// Reserved words must not be used as node IDs — they shadow built-in
 		// scope variables or CEL keywords.
