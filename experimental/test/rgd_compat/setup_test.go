@@ -115,12 +115,6 @@ func TestCore(t *testing.T) {
 	if files := os.Getenv("COMPAT_FOCUS_FILES"); files != "" {
 		suiteConfig.FocusFiles = append(suiteConfig.FocusFiles, strings.Fields(files)...)
 	}
-	// COMPAT_SKIP_SPECS allows excluding individual specs by description
-	// substring. Used when a file is mostly passing but one spec requires
-	// capabilities not yet implemented (e.g., runtime forEach type checking).
-	if skip := os.Getenv("COMPAT_SKIP_SPECS"); skip != "" {
-		suiteConfig.SkipStrings = append(suiteConfig.SkipStrings, strings.Split(skip, "|")...)
-	}
 	RunSpecs(t, "Graph Compat Suite", suiteConfig, reporterConfig)
 }
 
