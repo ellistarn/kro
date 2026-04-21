@@ -34,9 +34,10 @@ Experimental work lives under `experimental/`. Read
 
 ## Skills
 
-Project-local skills live in `.skills/`. These are operational checklists
-the agent loads and executes — distinct from designs, which declare
-desired state.
+Project-local skills live in `.agents/skills/`. These are operational
+checklists the agent loads and executes — distinct from designs, which
+declare desired state. The `.agents/` path is auto-discovered by
+OpenCode without config.
 
 ## Dependency Invariant
 
