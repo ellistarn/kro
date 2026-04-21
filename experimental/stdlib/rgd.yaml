@@ -223,7 +223,8 @@ spec:
                         "kind": schema.spec.schema.kind,
                         "metadata": {
                           "name": instance.metadata.name,
-                          "namespace": instance.metadata.namespace
+                          "namespace": instance.metadata.namespace,
+                          "finalizers": ["experimental.kro.run/graph"]
                         },
                         "status": {
                           "state": "${" + (schema.spec.resources.size() == 0 ? "true" : schema.spec.resources.map(r, r.id + ".ready()").join(" && ")) + " ? 'ACTIVE' : 'IN_PROGRESS'}",
@@ -237,15 +238,6 @@ spec:
                             }
                           ]
                         }.merge(has(schema.spec.schema.status) ? schema.spec.schema.status : {})
-                      }}]
-                      + [{"id": "instanceLifecycle", "patch": {
-                        "apiVersion": schema.spec.schema.group + "/" + schema.spec.schema.apiVersion,
-                        "kind": schema.spec.schema.kind,
-                        "metadata": {
-                          "name": instance.metadata.name,
-                          "namespace": instance.metadata.namespace,
-                          "finalizers": ["experimental.kro.run/graph"]
-                        }
                       }}]
                     }
 
