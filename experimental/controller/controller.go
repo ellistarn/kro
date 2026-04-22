@@ -183,6 +183,7 @@ type walkState struct {
 	results           chan nodeResult
 	inflight          int
 	dynamicGVKChanged bool // set when a dynamic GVK resolves for the first time or changes
+	compilationFailed bool // when true, patch nodes are suppressed to avoid stale status writes
 }
 
 // notifyDependents dispatches all dependents of a node after its state is
@@ -359,9 +360,43 @@ func (w *walkState) tryDispatch(idx int) {
 		}
 	}
 	if hasExcluded {
-		w.plan.SetState(w.dag, node.ID, NodeExcluded)
-		w.notifyDependents(node.ID)
-		return
+		// Nodes with conditional gates (propagateWhen or includeWhen) can
+		// absorb excluded dependencies — the gate expression decides whether
+		// the node should proceed. For example:
+		//   propagateWhen: ${!validation.result.valid || crd.ready()}
+		// When `crd` is excluded (includeWhen was false), the expression
+		// should still evaluate: !true || false → true. Without this, the
+		// blanket exclusion prevents the gate from ever running.
+		//
+		// Nodes without gates propagate exclusion as before — they implicitly
+		// require all dependencies. Per 005-reconciliation.md § Propagation:
+		// "Excluded propagates as Excluded (definitive absence — safe to prune)."
+		hasGate := len(node.PropagateWhen) > 0 || len(node.IncludeWhen) > 0
+		if !hasGate {
+			w.plan.SetState(w.dag, node.ID, NodeExcluded)
+			w.notifyDependents(node.ID)
+			return
+		}
+		// Inject zero-value scope entries for excluded dependencies so gate
+		// expressions can reference them. An excluded node produces no output,
+		// so .ready() → false and field access → zero values.
+		for depID := range node.Dependencies {
+			depState := w.plan.States[depID]
+			if depState != NodeExcluded {
+				continue
+			}
+			if _, inScope := w.eval.scope[depID]; !inScope {
+				w.eval.scope[depID] = map[string]any{"__ready": false}
+			}
+		}
+		// Fall through to normal gate evaluation. If the gate evaluates to
+		// true, the node fires (e.g., validation failed → patch Inactive).
+		// If the gate evaluates to false AND a dependency is excluded, the
+		// node is excluded too — it cannot make progress and should not
+		// carry-forward old state that would compete with other writers
+		// (e.g., compilationStatus).
+		// The excludedDepsContributed flag is checked after gate evaluation
+		// in the propagateWhen handler below.
 	}
 	if hasBlocked {
 		w.plan.SetState(w.dag, node.ID, NodeBlocked)
@@ -388,6 +423,15 @@ func (w *walkState) tryDispatch(idx int) {
 		w.populateDepsMap(node)
 
 		if !w.eval.checkPropagateWhen(node.PropagateWhen, node.ID) {
+			// Gate is closed. If any dependency is excluded, the node can
+			// never fire — exclude it so other writers (compilationStatus)
+			// can claim the fields via SSA. Without this, carry-forward
+			// preserves stale state that blocks compilationStatus.
+			if hasExcluded {
+				w.plan.SetState(w.dag, node.ID, NodeExcluded)
+				w.notifyDependents(node.ID)
+				return
+			}
 			unsatisfied := w.eval.firstUnsatisfiedCondition(node.PropagateWhen)
 			logger.V(1).Info("propagateWhen input gate — retaining previous state",
 				"node", node.ID, "unsatisfied", unsatisfied)
@@ -547,6 +591,23 @@ func (w *walkState) tryDispatch(idx int) {
 			w.notifyDependents(node.ID)
 			return
 		}
+	}
+
+	// Suppress patch nodes when compilation failed. Patch nodes write
+	// status (e.g., rgdStatus writes Active/Inactive on the RGD), and
+	// stale patch writes from the fallback revision compete with the
+	// parent's compilationStatus node. Template, ref, watch, and def
+	// nodes continue normally — they manage real resources that should
+	// keep converging on the previous revision.
+	if w.compilationFailed && node.Type() == NodeTypePatch {
+		w.carryForwardKeys(node.ID)
+		if prevState, ok := w.state.previousPlanStates[node.ID]; ok {
+			w.plan.States[node.ID] = prevState
+		} else {
+			w.plan.States[node.ID] = NodePending
+		}
+		w.notifyDependents(node.ID)
+		return
 	}
 
 	// Build snapshot evaluator for the worker.
@@ -762,20 +823,30 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		revisions, listErr := listRevisions(ctx, r.Client, graphName, namespace)
 		if listErr != nil || len(revisions) == 0 {
 			// No previous revision to fall back to — truly stuck.
+			// Write Compiled=False status so the parent graph's
+			// compilationStatus node can propagate Inactive to the
+			// RGD. The compilation error is deterministic (bad spec),
+			// so retrying won't help — only a spec update (which
+			// arrives via watch, not retry) can fix it. Return nil
+			// when the status write succeeds to avoid exponential
+			// backoff waste; return error only if the status write
+			// itself fails.
 			if statusErr := r.updateStatus(ctx, graph, &reconcileState{compiled: false, compiledErr: err}); statusErr != nil {
 				logger.Error(statusErr, "updating status after revision error")
+				return ctrl.Result{}, fmt.Errorf("ensuring revision: %w", err)
 			}
-			return ctrl.Result{}, fmt.Errorf("ensuring revision: %w", err)
+			logger.Info("compilation failed, status updated", "error", err.Error())
+			return ctrl.Result{}, nil
 		}
 		// Use the most recent revision (listRevisions returns sorted by
 		// generation ascending, so the last element is the latest).
 		activeRevision = revisions[len(revisions)-1]
 		supersededRevisions = nil // No transition — same revision as before.
 		compilationErr = err
-		logger.Error(err, "compilation failed for current generation")
-		logger.Info("falling back to previous revision",
+		logger.Info("compilation failed, falling back to previous revision",
 			"revision", activeRevision.GetName(),
-			"generation", revisionGeneration(activeRevision))
+			"generation", revisionGeneration(activeRevision),
+			"error", err.Error())
 	}
 
 	// effectiveGeneration is the generation to stamp on identity labels
@@ -795,10 +866,16 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	// Parse and compile the active revision's spec (cached by revision name).
 	revisionSpec, state, err := r.compileRevision(ctx, graph.GetNamespace(), activeRevision)
 	if err != nil {
+		// compileRevision can fail when precompileExpressionChildGraphs
+		// resolves live objects (e.g., an RGD updated to have circular
+		// deps). Like ensureRevision, the error is deterministic — write
+		// Compiled=False status and return nil to avoid backoff waste.
 		if statusErr := r.updateStatus(ctx, graph, &reconcileState{compiled: false, compiledErr: err}); statusErr != nil {
 			logger.Error(statusErr, "updating status after compilation error")
+			return ctrl.Result{}, fmt.Errorf("compiling revision: %w", err)
 		}
-		return ctrl.Result{}, fmt.Errorf("compiling revision: %w", err)
+		logger.Info("compilation failed, status updated", "error", err.Error())
+		return ctrl.Result{}, nil
 	}
 
 	eval := newEvaluator(state)
@@ -1014,6 +1091,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		dispatched:           make(map[int]bool, len(dag.Nodes)),
 		outputsReady:         make(map[string]bool, len(dag.Nodes)),
 		results:              make(chan nodeResult, len(dag.Nodes)),
+		compilationFailed:    compilationErr != nil,
 	}
 
 	// Seed: dispatch all nodes with no in-graph dependencies.

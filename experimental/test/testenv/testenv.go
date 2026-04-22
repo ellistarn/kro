@@ -51,6 +51,10 @@ type Environment struct {
 	// created at build/controller.log.
 	LogWriter io.Writer
 
+	// PProfAddr is the address the controller's pprof endpoint is listening
+	// on (e.g. "127.0.0.1:54321"). Set after Start returns.
+	PProfAddr string
+
 	testEnv        *envtest.Environment
 	restConfig     *rest.Config
 	binaryCmd      *exec.Cmd
@@ -109,11 +113,12 @@ func (e *Environment) Start() (*rest.Config, error) {
 	}
 
 	// Start binary.
-	healthAddr, cmd, err := startBinary(binaryPath, e.kubeconfigPath, logWriter)
+	healthAddr, pprofAddr, cmd, err := startBinary(binaryPath, e.kubeconfigPath, logWriter)
 	if err != nil {
 		e.cleanup()
 		return nil, fmt.Errorf("starting binary: %w", err)
 	}
+	e.PProfAddr = pprofAddr
 	e.binaryCmd = cmd
 	e.binaryDied = make(chan error, 1)
 	go func() { e.binaryDied <- cmd.Wait() }()
@@ -226,19 +231,33 @@ func writeKubeconfig(cfg *rest.Config) (string, error) {
 	return f.Name(), nil
 }
 
-func startBinary(binaryPath, kubeconfigPath string, logWriter io.Writer) (string, *exec.Cmd, error) {
+func startBinary(binaryPath, kubeconfigPath string, logWriter io.Writer) (string, string, *exec.Cmd, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return "", nil, fmt.Errorf("picking health port: %w", err)
+		return "", "", nil, fmt.Errorf("picking health port: %w", err)
 	}
 	healthAddr := ln.Addr().String()
 	ln.Close()
 
+	pprofLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", "", nil, fmt.Errorf("picking pprof port: %w", err)
+	}
+	pprofAddr := pprofLn.Addr().String()
+	pprofLn.Close()
+
+	metricsLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", "", nil, fmt.Errorf("picking metrics port: %w", err)
+	}
+	metricsAddr := metricsLn.Addr().String()
+	metricsLn.Close()
+
 	cmd := exec.Command(binaryPath,
 		"--bootstrap",
 		"--health-probe-bind-address="+healthAddr,
-		"--metrics-bind-address=0",
-		"--pprof-bind-address=0",
+		"--metrics-bind-address="+metricsAddr,
+		"--pprof-bind-address="+pprofAddr,
 		"--max-workers=32",
 		"--drift-interval=2s",
 	)
@@ -246,9 +265,11 @@ func startBinary(binaryPath, kubeconfigPath string, logWriter io.Writer) (string
 	cmd.Stdout = logWriter
 	cmd.Stderr = logWriter
 	if err := cmd.Start(); err != nil {
-		return "", nil, fmt.Errorf("starting binary: %w", err)
+		return "", "", nil, fmt.Errorf("starting binary: %w", err)
 	}
-	return healthAddr, cmd, nil
+	fmt.Fprintf(os.Stderr, "pprof: http://%s/debug/pprof/\n", pprofAddr)
+	fmt.Fprintf(os.Stderr, "metrics: http://%s/metrics\n", metricsAddr)
+	return healthAddr, pprofAddr, cmd, nil
 }
 
 func waitForHealthy(healthAddr string, binaryDied <-chan error) error {
