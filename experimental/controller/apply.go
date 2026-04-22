@@ -9,6 +9,7 @@
 package graphcontroller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/structured-merge-diff/v6/fieldpath"
 )
 
 // ---------------------------------------------------------------------------
@@ -76,6 +78,81 @@ func isAPIServerManager(manager string) bool {
 	default:
 		return false
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Co-ownership detection
+// ---------------------------------------------------------------------------
+
+// isKroFieldManager returns true if the field manager name matches the kro
+// naming convention (<name>.<namespace>.internal.kro.run).
+func isKroFieldManager(manager string) bool {
+	return strings.HasSuffix(manager, ".internal.kro.run")
+}
+
+// coOwnershipCheck inspects managedFields on a resource after a successful
+// non-force patch apply to detect kro-to-kro field co-ownership. Returns an
+// error wrapping ErrFieldConflict if co-ownership is detected.
+//
+// Per 003-ownership.md § Co-ownership Detection: SSA silently co-owns fields
+// when two managers apply the same value. The check surfaces this as Conflict
+// so operators resolve it before a future value change produces a 409.
+//
+// Detection is scoped to kro Apply-type managers (*.internal.kro.run). External
+// controllers (HPAs, admission webhooks) are not checked.
+func coOwnershipCheck(obj *unstructured.Unstructured, ownFieldManager string) error {
+	managedFields := obj.GetManagedFields()
+	if len(managedFields) == 0 {
+		return nil
+	}
+
+	var ownEntry *metav1.ManagedFieldsEntry
+	var otherKroEntries []metav1.ManagedFieldsEntry
+
+	for i := range managedFields {
+		mf := &managedFields[i]
+		if mf.Operation != metav1.ManagedFieldsOperationApply {
+			continue
+		}
+		if mf.Subresource != "" {
+			continue
+		}
+		if mf.Manager == ownFieldManager {
+			ownEntry = mf
+			continue
+		}
+		if isKroFieldManager(mf.Manager) {
+			otherKroEntries = append(otherKroEntries, *mf)
+		}
+	}
+
+	if ownEntry == nil || len(otherKroEntries) == 0 {
+		return nil
+	}
+	if ownEntry.FieldsV1 == nil || len(ownEntry.FieldsV1.Raw) == 0 {
+		return nil
+	}
+
+	var ownSet fieldpath.Set
+	if err := ownSet.FromJSON(bytes.NewReader(ownEntry.FieldsV1.Raw)); err != nil {
+		return nil
+	}
+
+	for _, other := range otherKroEntries {
+		if other.FieldsV1 == nil || len(other.FieldsV1.Raw) == 0 {
+			continue
+		}
+		var otherSet fieldpath.Set
+		if err := otherSet.FromJSON(bytes.NewReader(other.FieldsV1.Raw)); err != nil {
+			continue
+		}
+		intersection := ownSet.Intersection(&otherSet)
+		if !intersection.Empty() {
+			return fmt.Errorf("field co-ownership: %s also claims %d field(s) on this resource: %w",
+				other.Manager, intersection.Size(), ErrFieldConflict)
+		}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -372,7 +449,13 @@ func (r *GraphReconciler) applySSA(ctx context.Context, graph *unstructured.Unst
 			if watcher != nil {
 				liveRV := watcher.getResourceVersion(gvr, obj.GetNamespace(), obj.GetName())
 				if liveRV != "" && liveRV == cached.resourceVersion {
-					return &unstructured.Unstructured{Object: cached.object}, nil
+					cachedObj := &unstructured.Unstructured{Object: cached.object}
+					if nodeType == NodeTypePatch && !forceApply {
+						if err := coOwnershipCheck(cachedObj, string(fieldOwner)); err != nil {
+							return cachedObj, err
+						}
+					}
+					return cachedObj, nil
 				}
 			}
 			readBack := &unstructured.Unstructured{}
@@ -382,17 +465,20 @@ func (r *GraphReconciler) applySSA(ctx context.Context, graph *unstructured.Unst
 					return nil, fmt.Errorf("reading %s: %w", obj.GetName(), err)
 				}
 				if nodeType == NodeTypeTemplate {
-					// Template: externally deleted. Clear cache + ErrPending.
 					r.Resources.remove(cacheKey)
 					return nil, fmt.Errorf("resource %s externally deleted: %w", obj.GetName(), ErrPending)
 				}
-				// Patch: object might not exist yet (race), fall through to apply
 			} else {
 				r.Resources.set(cacheKey, &cachedObject{
 					resourceVersion: readBack.GetResourceVersion(),
 					applyHash:       applyHash,
 					object:          readBack.Object,
 				})
+				if nodeType == NodeTypePatch && !forceApply {
+					if err := coOwnershipCheck(readBack, string(fieldOwner)); err != nil {
+						return readBack, err
+					}
+				}
 				return readBack, nil
 			}
 		}
@@ -537,6 +623,14 @@ func (r *GraphReconciler) applySSA(ctx context.Context, graph *unstructured.Unst
 		applyHash:       applyHash,
 		object:          readBack.Object,
 	})
+
+	// Per 003-ownership.md § Co-ownership Detection: detect kro-to-kro field
+	// co-ownership after a successful non-force patch apply.
+	if nodeType == NodeTypePatch && !forceApply {
+		if err := coOwnershipCheck(readBack, string(fieldOwner)); err != nil {
+			return readBack, err
+		}
+	}
 
 	return readBack, nil
 }

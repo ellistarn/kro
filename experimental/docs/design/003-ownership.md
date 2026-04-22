@@ -86,7 +86,43 @@ check passes unconditionally.
 
 The label check runs only for `template:`. Two `patch:` nodes on the same target — the
 steady-state pattern — are allowed. When two `patch:` nodes write the same field, SSA 409 catches
-the collision at the field layer.
+the collision at the field layer — unless they agree, in which case SSA silently co-owns (see
+§ Co-ownership Detection).
+
+### Co-ownership Detection
+
+SSA does not 409 when two managers apply the same field with the same value — it silently grants
+both managers ownership. The field works today, but the next value change by either side produces a
+409 that neither expected.
+
+The identity label check (above) catches this for `template:` on the common path — the check runs
+before SSA and rejects when another Graph's label is present. Two concurrent applies can race past
+the check (both GET before either applies), but the next reconcile detects the label and both enter
+Conflict.
+
+For `patch:` nodes, co-ownership detection is part of resolution. After a non-force apply, the
+controller inspects managedFields on the response object, parses the applying Graph's field set,
+and intersects it against every other kro Apply-type field manager (`*.internal.kro.run`). If the
+intersection is non-empty, the node enters Conflict. The check runs on every evaluation —
+including cache-hit paths — so it is durable across restarts.
+
+Detection uses SSA's own field set computation (managedFields) rather than reimplementing field
+ownership client-side. This requires the apply to land before the check runs. The write is
+harmless — values agree, the resource has the correct state before and after. Resolution requires a
+user action either way; whether the write landed does not change the resolution path.
+
+First writer wins — when it applied, no other kro manager existed in managedFields, so the check
+passed. The second writer's apply succeeds but the check finds the first writer's manager and
+enters Conflict. Two concurrent writers have the same TOCTOU race as templates — both apply before
+either checks. SSA bumps resourceVersion when adding a manager entry, the watcher triggers
+re-evaluation, and both enter Conflict on the next reconcile.
+
+Detection is scoped to kro-to-kro co-ownership. External controllers are not checked.
+
+Resolution: one side removes the contested field. The release apply drops that side's ownership,
+leaving the other as sole owner. This is also the field migration mechanism — the importing Graph
+adds the field (enters Conflict), the exporting Graph removes it (Conflict clears). Transient
+Conflict on the importing side only.
 
 ### Status Subresource
 
@@ -113,21 +149,29 @@ fields on the same resource. Each field manager owns its fields, no 409. A `patc
 writing status to a resource that a `template:` on another Graph created is the standard pattern; so is
 a Deployment where kro owns `spec.template` and an HPA owns `spec.replicas`.
 
-**Conflict.** A claim collides. Two detection layers catch different collisions. Identity labels
-catch kro-to-kro identity conflicts before SSA runs — a `template:` targeting a resource already
-labeled by another Graph is rejected. SSA 409 catches every field-level collision: two non-kro
-managers, a kro node and a non-kro manager, or two `patch:` nodes (same or different Graphs)
-writing the same field. Both surface as error conditions on the Graph; reconciliation stops on
-that resource. Resolution depends on the conflict: identity conflicts (between `template:` nodes)
-clear by setting `lifecycle.apply: Force` or removing one of the `template:` nodes; field conflicts
-clear by removing the contested fields from one side (Force is not applicable to `patch:`).
+**Conflict.** A claim collides. Three detection layers catch different collisions at different
+times. Identity labels catch kro-to-kro identity conflicts before SSA runs — a `template:`
+targeting a resource already labeled by another Graph is rejected. Co-ownership detection catches
+kro-to-kro field overlap after a successful apply — two `patch:` nodes writing the same field with
+the same value enter Conflict immediately, before either side attempts a change. SSA 409 catches
+every remaining field-level collision: two non-kro managers, a kro node and a non-kro manager, or
+two `patch:` nodes whose values diverge. All three surface as Conflict on the node. Resolution:
+identity conflicts clear by setting `lifecycle.apply: Force` or removing one `template:` node;
+field conflicts and co-ownership clear by removing the contested fields from one side.
 
-**Migration.** Management transfers from one Graph to another. The importing side adds a
-`template:` with `lifecycle.apply: Force`. The force apply takes all fields; the eviction release
-removes the old manager's identity labels and `managedFields` entry. The old Graph's next
+**Migration.** Management transfers from one Graph to another. For `template:`, the importing side
+adds a `template:` with `lifecycle.apply: Force`. The force apply takes all fields; the eviction
+release removes the old manager's identity labels and `managedFields` entry. The old Graph's next
 reconcile finds no identity labels on the resource and no longer considers it owned. The user
-removes the node from the exporting side. Migration from a non-kro manager follows the same
-arc.
+removes the node from the exporting side. Migration from a non-kro manager follows the same arc.
+
+For `patch:` field migration, the importing Graph adds the field to its `patch:` spec with the same
+value. The importing Graph's apply succeeds, but the co-ownership check finds the exporting Graph's
+manager and enters Conflict. The exporting Graph remains Ready — it was the first writer. The
+exporting Graph removes the field from its `patch:` spec. The release apply drops the exporting
+Graph's ownership; the importing Graph is now sole owner and recovers to Ready on the next
+reconcile. The migration window produces a transient Conflict on the importing side only — no Force
+required, the handoff is cooperative.
 
 **Type change across revisions.** Swapping `template:` for `patch:` (or vice versa) on the same
 node ID is a spec edit handled by revision supersession. The running resource is not reclassified
@@ -182,3 +226,29 @@ cross-namespace references are common. Bind to UIDs that break on delete+recreat
 **managedFields inspection for delete decisions.** Introduces heuristics around substantive vs
 administrative entries and stale managers. Breaks the clean rule: `template:` deletes, `patch:`
 releases.
+
+**Warning instead of Conflict for patch co-ownership.** A warning surfaces the problem without
+blocking. But co-ownership is a misconfiguration — two controllers think they own the same field,
+and the next value change by either side produces a 409. Treating it as informational delays
+resolution and lets the time bomb tick. Conflict matches the severity: the field ownership is
+contested, even though the values happen to agree right now.
+
+**Detecting all co-ownership (not just kro-to-kro).** Co-ownership with external controllers
+(HPAs, admission webhooks, service meshes) is common and expected. Blocking on every external
+co-ownership would break standard patterns. Different coordination problems need different
+solutions.
+
+**Force on `patch:` to override co-ownership.** Force has no effect when values agree — the apply
+already succeeded. Force changes behavior when values disagree (409), but that produces a Conflict
+from SSA, not from co-ownership detection. Force cannot serve as an override for a condition that
+fires only when values match.
+
+**Pre-apply co-ownership detection.** Checking managedFields before applying would prevent the
+write entirely, but SSA is the authority on field ownership — it computes field sets from the apply
+payload using the resource's schema, including list merge strategies and atomic vs granular map
+handling. Reimplementing this client-side produces a divergent field ownership model that breaks
+with schema changes and other tools. The pre-apply check also has the same TOCTOU race (two
+concurrent GETs before either applies), so it doesn't eliminate the co-ownership window — it just
+makes it harder to detect because neither writer's managedFields entry exists yet. Post-apply
+detection uses SSA's own field set computation, catches the race on the next reconcile via
+resourceVersion change, and the harmless write (values agree) does not change the resolution path.
