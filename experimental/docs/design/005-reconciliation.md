@@ -132,7 +132,9 @@ At each frontier node:
    - `def:` — resolve all values against the current scope. No API calls.
    - `template:` — evaluate, hash desired state (apply-hash), compare against previous. Match → omit
      write. Resync bypasses — apply unconditionally. Differs → SSA apply. 409 → Conflict.
-   - `patch:` — same as `template:`. 409 → Conflict. Auto-splits status subresource.
+   - `patch:` — same as `template:`. 409 → Conflict. Auto-splits status subresource. After a
+     successful non-force apply, inspects managedFields for kro-to-kro field co-ownership (see
+     [003-ownership](003-ownership.md#co-ownership-detection)). Co-ownership → Conflict.
 
    The apply-hash within Resolve is the third hash layer — it skips the SSA write when the desired
    state is unchanged. When a template targets both the main resource and the status subresource,
