@@ -394,11 +394,9 @@ func (r *GraphReconciler) applySSA(ctx context.Context, graph *unstructured.Unst
 				if !apierrors.IsNotFound(err) {
 					return nil, fmt.Errorf("reading %s: %w", obj.GetName(), err)
 				}
-				if nodeType == NodeTypeTemplate {
-					// Template: externally deleted. Clear cache + ErrPending.
-					r.Resources.remove(cacheKey)
-					return nil, fmt.Errorf("resource %s externally deleted: %w", obj.GetName(), ErrPending)
-				}
+				// Resource externally deleted — clear cache and fall
+				// through to re-apply via SSA (creates if absent).
+				r.Resources.remove(cacheKey)
 				// Patch: object might not exist yet (race), fall through to apply
 			} else {
 				r.Resources.set(cacheKey, &cachedObject{
