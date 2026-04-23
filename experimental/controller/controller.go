@@ -183,6 +183,7 @@ type walkState struct {
 	results           chan nodeResult
 	inflight          int
 	dynamicGVKChanged bool // set when a dynamic GVK resolves for the first time or changes
+	staleReads        bool // set when a Client.Get/Patch returned data older than the informer knows
 }
 
 // notifyDependents dispatches all dependents of a node after its state is
@@ -517,10 +518,31 @@ func (w *walkState) tryDispatch(idx int) {
 					prevName, _ := prevMD["name"].(string)
 					gv, _ := schema.ParseGroupVersion(prevAPIVersion)
 					gvk := gv.WithKind(prevKind)
+					gvr := gvkToGVR(gvk)
 					readBack := &unstructured.Unstructured{}
 					readBack.SetGroupVersionKind(gvk)
 					if err := w.r.Client.Get(w.ctx, types.NamespacedName{Namespace: prevNS, Name: prevName}, readBack); err == nil {
-						w.eval.scope[node.ID] = readBack.Object
+						// Verify the GET result isn't stale. If the
+						// metadata informer has a newer RV than what
+						// Client.Get returned, the cache served stale
+						// data. Keep prevScope — the node's state
+						// won't change this cycle, but the informer
+						// RV mismatch means selfChanged will fire
+						// again on the next triggered reconcile.
+						readBackRV := readBack.GetResourceVersion()
+						stale := false
+						if w.watcher != nil {
+							liveRV := w.watcher.getResourceVersion(gvr, prevNS, prevName)
+							if liveRV != "" && liveRV != readBackRV {
+								stale = true
+							}
+						}
+						if !stale {
+							w.eval.scope[node.ID] = readBack.Object
+						} else {
+							w.eval.scope[node.ID] = prevScope
+							w.staleReads = true
+						}
 					} else {
 						w.eval.scope[node.ID] = prevScope
 					}
@@ -1696,6 +1718,16 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	// typed artifact on the next pass.
 	if walk.dynamicGVKChanged {
 		return ctrl.Result{Requeue: true}, nil
+	}
+	// A stale read means a Client.Get returned data older than what the
+	// metadata informer knows. This happens when the controller-runtime
+	// cache lags the informer — typically right after a resource is
+	// mutated by an external controller (e.g., CRD Established). The
+	// informer saw the event but the cache hasn't caught up. One
+	// immediate requeue lets the cache settle; selfChanged will detect
+	// the RV mismatch again and re-read.
+	if walk.staleReads {
+		return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 	}
 	return ctrl.Result{}, nil
 }
