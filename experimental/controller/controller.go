@@ -398,7 +398,19 @@ func (w *walkState) tryDispatch(idx int) {
 		// expressions resolve correctly.
 		w.populateDepsMap(node)
 
-		if !w.eval.checkPropagateWhen(node.PropagateWhen, node.ID) {
+		gate := w.eval.checkPropagateWhen(node.PropagateWhen, node.ID)
+		if gate != gatePass {
+			// When a dependency is Excluded and the gate ERRORS (not just
+			// blocks), the gate can't evaluate because its inputs are
+			// missing — the excluded dependency's data is absent from scope.
+			// Contagious exclusion should proceed: the gate didn't actively
+			// decide "no," it failed to decide at all.
+			if hasExcluded && gate == gateError {
+				w.plan.SetState(w.dag, node.ID, NodeExcluded)
+				w.notifyDependents(node.ID)
+				return
+			}
+
 			unsatisfied := w.eval.firstUnsatisfiedCondition(node.PropagateWhen)
 			logger.V(1).Info("propagateWhen input gate — retaining previous state",
 				"node", node.ID, "unsatisfied", unsatisfied)
@@ -594,7 +606,7 @@ func (w *walkState) tryDispatch(idx int) {
 		} else {
 			// First reconcile, resync, or previous incremental error:
 			// force full list.
-			workerEval.collectionDriftOrFull = true
+			workerEval.collectionResyncOrFull = true
 		}
 	}
 
