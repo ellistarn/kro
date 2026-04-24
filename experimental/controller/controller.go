@@ -289,6 +289,9 @@ func (w *walkState) skipNode(node *graphpkg.Node) {
 	for _, depIdx := range w.dag.Dependents[node.ID] {
 		w.tryDispatch(depIdx)
 	}
+	for _, depIdx := range w.dag.ReadinessDependents[node.ID] {
+		w.tryDispatch(depIdx)
+	}
 }
 
 // tryDispatch checks if a node can be dispatched. Three outcomes:
@@ -433,6 +436,12 @@ func (w *walkState) tryDispatch(idx int) {
 			} else {
 				w.plan.States[node.ID] = dagpkg.NodePending
 			}
+			// Record previousPlanStates so subsequent reconciles that
+			// skip this node (outputsReady) can restore the correct
+			// state via FinalizeSkippedStates. Without this, a gate-
+			// blocked node's state is lost between reconciles, causing
+			// "skipped node with no prior state" fallthrough to Pending.
+			w.state.previousPlanStates[node.ID] = w.plan.States[node.ID]
 			for _, depIdx := range w.dag.Dependents[node.ID] {
 				w.tryDispatch(depIdx)
 			}
@@ -502,6 +511,20 @@ func (w *walkState) tryDispatch(idx int) {
 				return
 			}
 
+				// When a readiness dep's plan state changed (e.g.,
+				// deployment went from NotReady to Ready), body .ready()
+				// calls will return different values. Path 2 only refreshes
+				// the node's own scope — it doesn't re-evaluate the body.
+				// Fall through to Path 3 so the body picks up the new
+				// readiness state and the status patch transitions from
+				// IN_PROGRESS to ACTIVE.
+				if readinessDepChanged {
+					logger.V(1).Info("readiness dep changed — falling through to full evaluation",
+						"node", node.ID)
+					delete(w.state.previousEvalHashes, node.ID)
+					goto fullEval
+				}
+
 				// Path 2: watch-triggered or self-state changed — refresh scope.
 				//
 				// This is the primary fast path for watch-driven state changes.
@@ -534,6 +557,14 @@ func (w *walkState) tryDispatch(idx int) {
 					// serve stale data.
 					if err := w.r.apiReader().Get(w.ctx, types.NamespacedName{Namespace: prevNS, Name: prevName}, readBack); err == nil {
 						w.eval.scope[node.ID] = readBack.Object
+					} else if apierrors.IsNotFound(err) {
+						// Resource was deleted externally. Path 2 can't
+						// refresh — fall through to Path 3 (full evaluation)
+						// which will re-create the resource via SSA apply.
+						logger.V(1).Info("resource deleted externally — falling through to full evaluation",
+							"node", node.ID)
+						delete(w.state.previousEvalHashes, node.ID)
+						goto fullEval
 					} else {
 						w.eval.scope[node.ID] = prevScope
 					}
@@ -585,9 +616,6 @@ func (w *walkState) tryDispatch(idx int) {
 							for _, depIdx := range w.dag.Dependents[node.ID] {
 								w.propagationTriggered[w.dag.Nodes[depIdx].ID] = true
 							}
-							for _, depIdx := range w.dag.ReadinessDependents[node.ID] {
-								w.propagationTriggered[w.dag.Nodes[depIdx].ID] = true
-							}
 						}
 						w.state.previousSelfHashes[node.ID] = propagateHash
 					} else {
@@ -595,16 +623,17 @@ func (w *walkState) tryDispatch(idx int) {
 						for _, depIdx := range w.dag.Dependents[node.ID] {
 							w.propagationTriggered[w.dag.Nodes[depIdx].ID] = true
 						}
-						for _, depIdx := range w.dag.ReadinessDependents[node.ID] {
-							w.propagationTriggered[w.dag.Nodes[depIdx].ID] = true
-						}
 					}
 				}
 				for _, depIdx := range w.dag.Dependents[node.ID] {
 					w.tryDispatch(depIdx)
 				}
+				for _, depIdx := range w.dag.ReadinessDependents[node.ID] {
+					w.tryDispatch(depIdx)
+				}
 				return
 			}
+		fullEval:
 			// Path 3: hash mismatch → full evaluation.
 		}
 	} // canHashSkip
@@ -1358,9 +1387,6 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 						for _, depIdx := range dag.Dependents[node.ID] {
 							walk.propagationTriggered[dag.Nodes[depIdx].ID] = true
 						}
-						for _, depIdx := range dag.ReadinessDependents[node.ID] {
-							walk.propagationTriggered[dag.Nodes[depIdx].ID] = true
-						}
 					}
 					state.previousSelfHashes[node.ID] = propagateHash
 				}
@@ -1391,9 +1417,6 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 
 		// Check dependents: dispatch any whose dependencies are now satisfied.
 		for _, depIdx := range dag.Dependents[node.ID] {
-			walk.tryDispatch(depIdx)
-		}
-		for _, depIdx := range dag.ReadinessDependents[node.ID] {
 			walk.tryDispatch(depIdx)
 		}
 	}
