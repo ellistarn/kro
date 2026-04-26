@@ -152,6 +152,18 @@ func (w *walkState) notifyDependents(nodeID string) {
 	}
 }
 
+// notifyAllDependents extends notifyDependents to also trigger
+// ReadinessDependents — nodes that consume .ready() without a hard
+// DAG edge. Used for exclusion state changes where the __excluded
+// stamp must reach status-patch consumers.
+func (w *walkState) notifyAllDependents(nodeID string) {
+	w.notifyDependents(nodeID)
+	for _, depIdx := range w.dag.ReadinessDependents[nodeID] {
+		w.propagationTriggered[w.dag.Nodes[depIdx].ID] = true
+		w.tryDispatch(depIdx)
+	}
+}
+
 // carryForwardKeys retains a node's previous applied keys in the walk's
 // per-node key map. Used when a node is skipped, blocked, or in error — the
 // resource may still exist in the cluster, so its keys must remain in the
@@ -649,7 +661,9 @@ func (w *walkState) tryDispatch(idx int) {
 			w.plan.SetState(w.dag, node.ID, dagpkg.NodeExcluded)
 			w.state.previousPlanStates[node.ID] = dagpkg.NodeExcluded
 			delete(w.state.previousEvalHashes, node.ID)
-			w.notifyDependents(node.ID)
+			w.eval.scope[node.ID] = map[string]any{"__excluded": true}
+			w.state.previousScope[node.ID] = w.eval.scope[node.ID]
+			w.notifyAllDependents(node.ID)
 			return
 		}
 		// Fall through to propagateWhen evaluation.
@@ -695,7 +709,9 @@ func (w *walkState) tryDispatch(idx int) {
 				w.plan.SetState(w.dag, node.ID, dagpkg.NodeExcluded)
 				w.state.previousPlanStates[node.ID] = dagpkg.NodeExcluded
 				delete(w.state.previousEvalHashes, node.ID)
-				w.notifyDependents(node.ID)
+				w.eval.scope[node.ID] = map[string]any{"__excluded": true}
+				w.state.previousScope[node.ID] = w.eval.scope[node.ID]
+				w.notifyAllDependents(node.ID)
 				return
 			}
 
@@ -917,7 +933,9 @@ func (w *walkState) tryDispatch(idx int) {
 			w.plan.SetState(w.dag, node.ID, dagpkg.NodeExcluded)
 			w.state.previousPlanStates[node.ID] = dagpkg.NodeExcluded
 			delete(w.state.previousEvalHashes, node.ID)
-			w.notifyDependents(node.ID)
+			w.eval.scope[node.ID] = map[string]any{"__excluded": true}
+			w.state.previousScope[node.ID] = w.eval.scope[node.ID]
+			w.notifyAllDependents(node.ID)
 			return
 		}
 	}

@@ -63,6 +63,12 @@ func celReadyFunction() []cel.EnvOption {
 		}
 		switch obj := native.(type) {
 		case map[string]any:
+			// Excluded nodes are vacuously satisfied — per 005-reconciliation.md,
+			// Excluded is definitive absence that does not surface as a failure
+			// in the Ready condition rollup.
+			if excluded, _ := obj["__excluded"].(bool); excluded {
+				return types.Bool(true)
+			}
 			// Scalar node — read __ready directly
 			ready, _ := obj["__ready"].(bool)
 			return types.Bool(ready)

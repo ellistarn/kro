@@ -200,7 +200,7 @@ spec:
                             : {}
                         )})
                       + schema.spec.resources.filter(r, !has(r.externalRef)).map(r, r.merge({
-                        "propagateWhen": has(r.propagateWhen) ? r.propagateWhen : ["${" + r.id + ".dependencies().all(d, d.ready())}"],
+                        "propagateWhen": has(r.propagateWhen) ? r.propagateWhen : (has(r.forEach) ? [] : ["${" + r.id + ".dependencies().all(d, d.ready())}"]),
                         "forceApply": true,
                         "template": r.template.merge({
                           "metadata": (has(r.template.metadata) ? r.template.metadata : {}).merge({
