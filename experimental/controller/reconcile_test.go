@@ -1885,9 +1885,11 @@ func TestBareIdentifierForEachDependency(t *testing.T) {
 
 	// The consumer node must depend on both "items" (bare forEach reference)
 	// and "source" (field access in template body).
-	assert.True(t, consumerNode["items"],
+	_, hasItems := consumerNode["items"]
+	assert.True(t, hasItems,
 		"consumer must depend on 'items' (bare identifier in forEach expression)")
-	assert.True(t, consumerNode["source"],
+	_, hasSource := consumerNode["source"]
+	assert.True(t, hasSource,
 		"consumer must depend on 'source' (field access in template body)")
 
 	// Verify the reverse: items.Dependents must include consumer.

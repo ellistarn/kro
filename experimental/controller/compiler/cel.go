@@ -304,6 +304,35 @@ func (c *CompiledGraph) WrapScope(scope map[string]any) map[string]any {
 	return wrapped
 }
 
+// LenientScope wraps a scope map so that variable lookups for node IDs
+// not present in the scope return map[string]any{} instead of erroring.
+// This enables lazy evaluation: .ready() calls and short-circuit branches
+// can reference undispatched nodes without creating hard dependency edges.
+//
+// The CEL environment declares all node IDs as variables at compile time,
+// so typos are still caught during compilation. Leniency is only at
+// evaluation time — a missing scope entry means the node hasn't been
+// dispatched yet (or was Excluded/Blocked), not that it doesn't exist.
+//
+// An empty map is the correct default: .ready() on {} returns false,
+// field path access on {} returns data-pending, and the expression
+// evaluates against whatever state exists.
+func LenientScope(scope map[string]any, nodeIDs map[string]int) map[string]any {
+	if len(nodeIDs) == 0 {
+		return scope
+	}
+	lenient := make(map[string]any, len(scope)+len(nodeIDs))
+	// Pre-populate all node IDs with empty map defaults.
+	for id := range nodeIDs {
+		lenient[id] = map[string]any{}
+	}
+	// Overlay with real scope values — real data wins.
+	for k, v := range scope {
+		lenient[k] = v
+	}
+	return lenient
+}
+
 // ---------------------------------------------------------------------------
 // Compilation
 // ---------------------------------------------------------------------------

@@ -42,8 +42,10 @@ func extractFieldPathsFromAST(expr celast.Expr, scopeVars map[string]bool, compr
 
 		case celast.CallKind:
 			call := e.AsCall()
-			// Skip the target of ready() calls — readiness is a runtime
-			// property tracked separately (ReadinessDeps), not a field path.
+			// Skip the target of ready() calls. Per 001-graph.md § Dependencies,
+			// .ready() reads __ready and should produce a dependency path
+			// ["__ready"]. TODO: extract ["__ready"] as a DepPath so the
+			// input-hash covers readiness changes uniformly.
 			if call.IsMemberFunction() && call.FunctionName() == "ready" {
 				return
 			}

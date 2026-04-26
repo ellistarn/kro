@@ -95,12 +95,12 @@ type walkState struct {
 	inflight          int
 	dynamicGVKChanged bool // set when a dynamic GVK resolves for the first time or changes
 
-	// staleReadinessDeps tracks nodes dispatched to workers while some
-	// of their ReadinessDeps were still inflight. The worker snapshot
+	// staleLazyDeps tracks nodes dispatched to workers while some of
+	// their lazy dependencies were still inflight. The worker snapshot
 	// captured stale .ready() values. After the walk, explicit triggers
-	// are deposited for these nodes so the next reconcile re-evaluates
-	// them with fresh scope from completed readiness deps.
-	staleReadinessDeps map[string]bool
+	// are deposited so the next reconcile re-evaluates them with fresh
+	// scope from completed lazy deps.
+	staleLazyDeps map[string]bool
 
 	// --- Inputs set by Reconcile before run() ---
 
@@ -124,8 +124,8 @@ type walkState struct {
 	// commit: if no walk happens, previous watch registrations are preserved.
 	walkAttempted bool
 
-	// requeueFloor is an explicit requeue interval set during the walk
-	// (e.g., stale readiness deps). Zero means no walk-initiated floor.
+	// requeueFloor is an explicit requeue interval set during the walk.
+	// Zero means no walk-initiated floor.
 	// The prune phase in Reconcile may further update the floor.
 	requeueFloor time.Duration
 
@@ -243,9 +243,6 @@ func (w *walkState) skipNode(node *graphpkg.Node) {
 	for _, depIdx := range w.dag.Dependents[node.ID] {
 		w.tryDispatch(depIdx)
 	}
-	for _, depIdx := range w.dag.ReadinessDependents[node.ID] {
-		w.tryDispatch(depIdx)
-	}
 }
 
 // propagateIfChanged computes the propagation hash for a node's output and
@@ -291,13 +288,6 @@ func (w *walkState) propagateIfChanged(node *graphpkg.Node, observed any, nodeSt
 		for _, depIdx := range w.dag.Dependents[node.ID] {
 			w.propagationTriggered[w.dag.Nodes[depIdx].ID] = true
 		}
-		// ReadinessDependents consume .ready() state without a hard DAG
-		// edge. They need the same propagation trigger so tryDispatch
-		// bypasses the skip check and re-evaluates them with the updated
-		// readiness verdict.
-		for _, depIdx := range w.dag.ReadinessDependents[node.ID] {
-			w.propagationTriggered[w.dag.Nodes[depIdx].ID] = true
-		}
 	}
 	log.FromContext(w.ctx).V(1).Info("propagation hash check",
 		"node", node.ID, "propagated", propagated,
@@ -306,14 +296,11 @@ func (w *walkState) propagateIfChanged(node *graphpkg.Node, observed any, nodeSt
 	return true
 }
 
-// unconditionalPropagate marks all dependents and readiness dependents as
-// propagation-triggered. Used when the propagation hash cannot be computed
-// — the safe fallback is to assume output changed.
+// unconditionalPropagate marks all dependents as propagation-triggered.
+// Used when the propagation hash cannot be computed — the safe fallback
+// is to assume output changed.
 func (w *walkState) unconditionalPropagate(node *graphpkg.Node) {
 	for _, depIdx := range w.dag.Dependents[node.ID] {
-		w.propagationTriggered[w.dag.Nodes[depIdx].ID] = true
-	}
-	for _, depIdx := range w.dag.ReadinessDependents[node.ID] {
 		w.propagationTriggered[w.dag.Nodes[depIdx].ID] = true
 	}
 }
@@ -497,19 +484,20 @@ func (w *walkState) run() {
 		for _, depIdx := range w.dag.Dependents[node.ID] {
 			w.tryDispatch(depIdx)
 		}
-		for _, depIdx := range w.dag.ReadinessDependents[node.ID] {
-			w.tryDispatch(depIdx)
-		}
 	}
 
 	// --- Post-walk cleanup ---
 
 	w.walkAttempted = true
 
-	// Stale readiness dispatch: deposit triggers for nodes that evaluated
-	// with stale .ready() values so the next reconcile re-evaluates them.
-	if len(w.staleReadinessDeps) > 0 && w.watcher != nil {
-		for nodeID := range w.staleReadinessDeps {
+	// Stale lazy dep dispatch: when a node dispatches before its lazy
+	// deps complete within the same walk, the worker sees stale .ready()
+	// values. Deposit explicit triggers so the next reconcile re-evaluates
+	// promptly (1s) rather than waiting for the default resync interval.
+	// The input-hash naturally differs on the next reconcile (__ready
+	// changed), so no hash invalidation is needed.
+	if len(w.staleLazyDeps) > 0 && w.watcher != nil {
+		for nodeID := range w.staleLazyDeps {
 			w.watcher.DepositTrigger(nodeID)
 		}
 		if w.requeueFloor == 0 || w.requeueFloor > time.Second {
@@ -569,7 +557,18 @@ func (w *walkState) tryDispatch(idx int) {
 	logger := log.FromContext(w.ctx)
 
 	if w.plan.States[node.ID] != dagpkg.NodeUnvisited {
-		return // already processed or excluded
+		// A gate-blocked node (propagateWhen set the state but the node
+		// was never dispatched to a worker) can be re-evaluated when a
+		// new propagation trigger arrives. This handles lazy deps: the
+		// gate may reference .ready() on a lazy dependency that wasn't
+		// complete when the gate was first evaluated. When the lazy dep
+		// completes, its propagation trigger gives the gate another
+		// chance.
+		if w.propagationTriggered[node.ID] && !w.dispatched[idx] {
+			delete(w.plan.States, node.ID)
+		} else {
+			return // already processed or excluded
+		}
 	}
 	if w.dispatched[idx] {
 		return // goroutine already running for this node
@@ -594,12 +593,16 @@ func (w *walkState) tryDispatch(idx int) {
 		return
 	}
 
-	// Check dependencies.
+	// Check hard dependencies. Lazy deps don't gate dispatch or cause
+	// exclusion — the expression has a branch that handles absent data.
 	hasExcluded := false
 	hasBlocked := false
 	hasPending := false
 	hasInflight := false
-	for depID := range node.Dependencies {
+	for depID, kind := range node.Dependencies {
+		if kind != graphpkg.DepHard {
+			continue
+		}
 		depState, exists := w.plan.States[depID]
 		if !exists {
 			continue
@@ -636,23 +639,17 @@ func (w *walkState) tryDispatch(idx int) {
 		}
 	}
 	if hasExcluded {
-		// Nodes with propagateWhen can handle excluded dependencies —
-		// the gate expression decides whether to proceed despite
-		// exclusion. Example: rgdStatus has propagateWhen:
-		// ${!validation.result.valid || crd.ready()}. When crd is
-		// excluded (invalid spec), the gate short-circuits to true
-		// and rgdStatus fires to write the error status. Without
-		// this check, Excluded propagates unconditionally and the
-		// status patch never happens.
-		if len(node.PropagateWhen) == 0 || node.ForEach != nil {
-			logger.V(1).Info("node excluded — dependency excluded", "node", node.ID)
-			w.plan.SetState(w.dag, node.ID, dagpkg.NodeExcluded)
-			w.state.previousPlanStates[node.ID] = dagpkg.NodeExcluded
-			delete(w.state.previousEvalHashes, node.ID)
-			w.notifyDependents(node.ID)
-			return
-		}
-		// Fall through to propagateWhen evaluation.
+		// Contagious exclusion: any hard dependency Excluded → Excluded.
+		// Per 005-reconciliation.md § Propagation step 1. Unconditional —
+		// no exception for propagateWhen. Lazy dependencies (.ready()
+		// targets) are not in node.Dependencies, so they don't trigger
+		// exclusion. The expression has a branch that handles absent data.
+		logger.V(1).Info("node excluded — dependency excluded", "node", node.ID)
+		w.plan.SetState(w.dag, node.ID, dagpkg.NodeExcluded)
+		w.state.previousPlanStates[node.ID] = dagpkg.NodeExcluded
+		delete(w.state.previousEvalHashes, node.ID)
+		w.notifyDependents(node.ID)
+		return
 	}
 	if hasBlocked {
 		logger.V(1).Info("node blocked — dependency in error state", "node", node.ID)
@@ -686,19 +683,6 @@ func (w *walkState) tryDispatch(idx int) {
 
 		gate := w.eval.checkPropagateWhen(node.PropagateWhen, node.ID)
 		if gate != gatePass {
-			// When a dependency is Excluded and the gate ERRORS (not just
-			// blocks), the gate can't evaluate because its inputs are
-			// missing — the excluded dependency's data is absent from scope.
-			// Contagious exclusion should proceed: the gate didn't actively
-			// decide "no," it failed to decide at all.
-			if hasExcluded && gate == gateError {
-				w.plan.SetState(w.dag, node.ID, dagpkg.NodeExcluded)
-				w.state.previousPlanStates[node.ID] = dagpkg.NodeExcluded
-				delete(w.state.previousEvalHashes, node.ID)
-				w.notifyDependents(node.ID)
-				return
-			}
-
 			unsatisfied := w.eval.firstUnsatisfiedCondition(node.PropagateWhen)
 			logger.V(1).Info("propagateWhen input gate — retaining previous state",
 				"node", node.ID, "unsatisfied", unsatisfied)
@@ -764,19 +748,9 @@ func (w *walkState) tryDispatch(idx int) {
 					}
 				}
 
-				readinessDepChanged := false
-				for depID := range node.ReadinessDeps {
-					prevState, hasPrev := w.state.previousPlanStates[depID]
-					currState, hasCurr := w.plan.States[depID]
-					if !hasPrev || !hasCurr || prevState != currState {
-						readinessDepChanged = true
-						break
-					}
-				}
-
-			if !selfChanged && !readinessDepChanged {
+			if !selfChanged {
 				// Path 1: skip everything — inputs unchanged, live state
-				// unchanged (informer RV matches), no readiness dep change.
+				// unchanged (informer RV matches).
 				logger.V(1).Info("evaluation hash match — skipping evaluation",
 					"node", node.ID)
 				if prevState, ok := w.state.previousPlanStates[node.ID]; ok {
@@ -785,20 +759,6 @@ func (w *walkState) tryDispatch(idx int) {
 				w.skipNode(node)
 				return
 			}
-
-				// When a readiness dep's plan state changed (e.g.,
-				// deployment went from NotReady to Ready), body .ready()
-				// calls will return different values. Path 2 only refreshes
-				// the node's own scope — it doesn't re-evaluate the body.
-				// Fall through to Path 3 so the body picks up the new
-				// readiness state and the status patch transitions from
-				// IN_PROGRESS to ACTIVE.
-				if readinessDepChanged {
-					logger.V(1).Info("readiness dep changed — falling through to full evaluation",
-						"node", node.ID)
-					delete(w.state.previousEvalHashes, node.ID)
-					goto fullEval
-				}
 
 				// Path 2: watch-triggered or self-state changed — refresh scope.
 				//
@@ -872,9 +832,6 @@ func (w *walkState) tryDispatch(idx int) {
 					}
 				}
 			for _, depIdx := range w.dag.Dependents[node.ID] {
-				w.tryDispatch(depIdx)
-			}
-			for _, depIdx := range w.dag.ReadinessDependents[node.ID] {
 				w.tryDispatch(depIdx)
 			}
 			return
@@ -966,19 +923,19 @@ func (w *walkState) tryDispatch(idx int) {
 	// Dispatch to worker goroutine.
 	w.dispatched[idx] = true
 
-	// Track stale readiness dispatch: if any ReadinessDep (not a hard dep)
-	// is still inflight, the worker snapshot has stale .ready() values.
-	// After the walk, explicit triggers are deposited so the next
-	// reconcile re-evaluates this node with fresh scope.
-	for depID := range node.ReadinessDeps {
-		if node.Dependencies[depID] {
+	// Track stale lazy deps: if any lazy dependency is still inflight
+	// (not yet completed in this walk), the worker snapshot has stale
+	// .ready() values. After the walk, deposit explicit triggers so the
+	// next reconcile re-evaluates these nodes with fresh scope.
+	for depID, kind := range node.Dependencies {
+		if kind != graphpkg.DepLazy {
 			continue
 		}
 		if w.plan.States[depID] == dagpkg.NodeUnvisited && !w.outputsReady[depID] {
-			if w.staleReadinessDeps == nil {
-				w.staleReadinessDeps = map[string]bool{}
+			if w.staleLazyDeps == nil {
+				w.staleLazyDeps = map[string]bool{}
 			}
-			w.staleReadinessDeps[node.ID] = true
+			w.staleLazyDeps[node.ID] = true
 			break
 		}
 	}

@@ -484,50 +484,39 @@ func (e *evaluator) includeWhen(conditions []string) (bool, error) {
 }
 
 // snapshotFor builds a worker evaluator for a specific node. The snapshot
-// contains the node's dependency data (read-only) and, for forEach nodes,
+// contains the node's hard dependency data (read-only) and, for forEach nodes,
 // the previous forEach state from the instance. The worker writes to its own
 // maps — the coordinator merges them back after the worker returns.
+//
+// Hard dependencies are copied from the coordinator's scope — the node waited
+// for them before dispatching. Lazy dependencies (e.g., .ready() targets in
+// branch expressions) get empty-map fallbacks when their data isn't available
+// yet — .ready() returns false and the expression takes the branch that
+// doesn't need the data.
 func (e *evaluator) snapshotFor(node *graph.Node, state *instanceState) *evaluator {
-	snap := make(map[string]any, len(node.Dependencies)+len(node.ReadinessDeps)+1)
-	for depID := range node.Dependencies {
-		if v, ok := e.scope[depID]; ok {
-			snap[depID] = v
+	snap := make(map[string]any, len(node.Dependencies)+1)
+	for depID, kind := range node.Dependencies {
+		if kind == graph.DepHard {
+			if v, ok := e.scope[depID]; ok {
+				snap[depID] = v
+			}
 		}
 	}
-	// Include readiness-only deps (in ReadinessDeps but not Dependencies)
-	// with fallback scope. Body .ready() calls create readinessDeps without
-	// hard dependencies — the node needs these in scope for CEL evaluation.
-	// Use current scope if available, fall back to previous scope (carries
-	// __ready stamps from last reconcile), then empty-map (ready() = false).
-	for depID := range node.ReadinessDeps {
-		if _, exists := snap[depID]; exists {
-			continue // already included via Dependencies
-		}
-		if v, ok := e.scope[depID]; ok {
-			snap[depID] = v
-		} else if prev, ok := state.previousScope[depID]; ok {
-			snap[depID] = prev
-		} else {
-			snap[depID] = map[string]any{}
-		}
-	}
-	// For nodes with zero declared dependencies (e.g., status reporter
-	// nodes whose template only uses .ready() calls — which the field
-	// path extractor skips), include scope entries for ALL graph nodes
-	// so the worker can evaluate .ready() without "no such attribute"
-	// errors. Use previous scope (carries __ready stamps from last
-	// reconcile) with empty-map fallback for new nodes.
-	if len(node.Dependencies) == 0 && len(node.ReadinessDeps) == 0 && e.compiled != nil {
-		for nodeID := range e.compiled.Topology.Index {
-			if _, exists := snap[nodeID]; exists {
+	// Include lazy dep data. Lazy deps didn't gate dispatch — the
+	// expression has a branch that handles absent data. If the
+	// coordinator has their data (they completed before this node was
+	// dispatched), include real values. Otherwise, provide empty-map
+	// fallbacks so .ready() returns false and field-path access returns
+	// data-pending instead of a CEL "no such attribute" error.
+	for depID, kind := range node.Dependencies {
+		if kind == graph.DepLazy {
+			if _, exists := snap[depID]; exists {
 				continue
 			}
-			if v, ok := e.scope[nodeID]; ok {
-				snap[nodeID] = v
-			} else if prev, ok := state.previousScope[nodeID]; ok {
-				snap[nodeID] = prev
+			if v, ok := e.scope[depID]; ok {
+				snap[depID] = v
 			} else {
-				snap[nodeID] = map[string]any{}
+				snap[depID] = map[string]any{}
 			}
 		}
 	}

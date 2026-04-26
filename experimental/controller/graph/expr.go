@@ -116,15 +116,13 @@ func CopyScope(scope map[string]any) map[string]any {
 // The exprPaths map is computed from CEL ASTs during compilation in
 // compileGraphSpec. See 005-reconciliation.md § Hash Mechanics.
 func ExtractReferencedPathsFromNode(node Node, exprPaths map[string]map[string][]FieldPath) (
-	dependencies map[string]bool,
+	dependencies map[string]DepKind,
 	depPaths map[string][]FieldPath,
 	selfPaths []FieldPath,
-	readinessDeps map[string]bool,
 	err error,
 ) {
-	dependencies = map[string]bool{}
+	dependencies = map[string]DepKind{}
 	depPaths = map[string][]FieldPath{}
-	readinessDeps = map[string]bool{}
 
 	// Helper: process a CEL expression's pre-extracted paths.
 	// When exprPaths is nil, falls back to string-based identifier extraction
@@ -134,7 +132,7 @@ func ExtractReferencedPathsFromNode(node Node, exprPaths map[string]map[string][
 			// Fallback: string-based dependency detection only.
 			id := ExtractFirstIdentifier(expr)
 			if id != "" && id != node.ID {
-				dependencies[id] = true
+				dependencies[id] = DepHard
 			}
 			return
 		}
@@ -153,31 +151,25 @@ func ExtractReferencedPathsFromNode(node Node, exprPaths map[string]map[string][
 				continue
 			}
 			// Upstream dependency reference
-			dependencies[scopeVar] = true
+			dependencies[scopeVar] = DepHard
 			for _, fp := range fieldPaths {
 				AddPath(depPaths, scopeVar, fp)
 			}
 		}
 	}
 
-	// Helper: find all .ready() targets in an expression and register them
-	// as readiness deps. The field path walker skips .ready() targets (no
-	// paths extracted), so we need string-based extraction. Scans for every
-	// occurrence of ".ready()" and extracts the identifier immediately
-	// before it.
+	// Helper: find all .ready() targets in an expression and register
+	// them as lazy dependencies. .ready() calls appear inside ternary
+	// or short-circuit expressions that have fallback branches — the
+	// expression can produce a result without the target's data. The
+	// lazy dependency ensures the consumer is in the target's Dependents
+	// for propagation triggering, without gating dispatch or causing
+	// contagious exclusion.
 	//
-	// addDataDep controls whether the target is also added to dependencies
-	// (creating a hard DAG edge). Gate expressions (readyWhen/propagateWhen)
-	// need hard deps because the gate evaluator runs in the coordinator
-	// and requires the upstream in scope. Body expressions (template/patch)
-	// must NOT create hard deps — the status reporter node
-	// (rgdInstanceStatus) uses .ready() in its body to compute
-	// IN_PROGRESS/ACTIVE, and hard deps on blocked upstream nodes would
-	// prevent the status patch from running. Body .ready() targets use
-	// readinessDeps only; the snapshotFor zero-deps fallback populates
-	// scope, and ReadinessDependents propagation triggers re-evaluation
-	// when readiness changes.
-	checkReadyRef := func(expr string, addDataDep bool) {
+	// The field path walker already skips .ready() targets (fieldpath.go:47),
+	// so no DepPaths are created — the dependency is for ordering and
+	// propagation, not field-path hashing.
+	checkReadyRef := func(expr string) {
 		remaining := expr
 		for {
 			idx := strings.Index(remaining, ".ready()")
@@ -199,9 +191,8 @@ func ExtractReferencedPathsFromNode(node Node, exprPaths map[string]map[string][
 					"bytes", "list", "type", "duration", "timestamp":
 				default:
 					if id != node.ID {
-						readinessDeps[id] = true
-						if addDataDep {
-							dependencies[id] = true
+						if existing, exists := dependencies[id]; !exists || existing == DepLazy {
+							dependencies[id] = DepLazy
 						}
 					}
 				}
@@ -269,7 +260,7 @@ func ExtractReferencedPathsFromNode(node Node, exprPaths map[string]map[string][
 				continue
 			}
 			processExpr(expr, false)
-			checkReadyRef(expr, false) // body: readinessDeps only, no hard DAG edge
+			checkReadyRef(expr) // .ready() creates dependency for ordering + re-triggering
 			checkDepsRef(expr)
 			if err != nil {
 				return
@@ -277,7 +268,11 @@ func ExtractReferencedPathsFromNode(node Node, exprPaths map[string]map[string][
 		}
 	}
 
-	// Process readyWhen + propagateWhen → depPaths + selfPaths + readinessDeps
+	// Process readyWhen + propagateWhen → depPaths + selfPaths
+	// With lazy evaluation, .ready() calls in gate expressions no longer
+	// create hard dependencies. The gate evaluates .ready() against
+	// whatever's in scope — if the target hasn't been dispatched,
+	// .ready() returns false, and the gate blocks.
 	var gateStrs []string
 	for _, s := range node.ReadyWhen {
 		gateStrs = append(gateStrs, s)
@@ -298,7 +293,7 @@ func ExtractReferencedPathsFromNode(node Node, exprPaths map[string]map[string][
 				continue
 			}
 			processExpr(expr, true)
-			checkReadyRef(expr, true) // gate: hard DAG edge needed for scope access
+			checkReadyRef(expr) // gate: hard dep needed for re-triggering
 			checkDepsRef(expr)
 			if err != nil {
 				return
@@ -306,7 +301,7 @@ func ExtractReferencedPathsFromNode(node Node, exprPaths map[string]map[string][
 		}
 	}
 
-	return dependencies, depPaths, selfPaths, readinessDeps, nil
+	return dependencies, depPaths, selfPaths, nil
 }
 
 // CollectStrings recursively collects all string values from a value tree.

@@ -311,7 +311,7 @@ func hashMetadataFiltered(hs *hashState, md map[string]any) {
 // in each per-item cached hash as a prefix. When context changes but
 // collection items are stable, the prefix differs and all cached hashes
 // become stale — forcing re-evaluation.
-func hashForEachContext(scope map[string]any, deps map[string]bool) string {
+func hashForEachContext(scope map[string]any, deps map[string]graph.DepKind) string {
 	h := fnv.New64a()
 	depIDs := make([]string, 0, len(deps))
 	for id := range deps {

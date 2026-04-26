@@ -326,6 +326,47 @@ Dependencies are inferred from CEL expression references. If node B's template c
 `${A.metadata.name}`, B depends on A. The dependency graph must be acyclic — cycles are rejected at
 compile time. Nodes with no dependency relationship are independent and are processed in parallel.
 
+A reference to another node is classified as **hard** or **lazy** based on the expression structure:
+
+- **Hard** — every evaluation path through the expression requires the referenced node's data. If
+  the node is absent, the expression cannot produce a result. Example: `${A.metadata.name}` — no
+  branch avoids accessing A.
+- **Lazy** — at least one evaluation path produces a result without the referenced node's data.
+  Example: `${A.ready() ? 'ACTIVE' : 'IN_PROGRESS'}` — the false branch does not require A's data.
+
+`.ready()` reads the `__ready` field from the referenced node's scope data. At compile time, the AST
+walker extracts `["__ready"]` as a dependency path — the same mechanism as any other field reference.
+A ternary like `${A.ready() ? ... : ...}` produces a lazy dependency because the false branch does
+not access A. A bare `${A.ready()}` without a fallback branch produces a hard dependency.
+
+The classification is determined by AST analysis at compile time. At each short-circuit operator
+(`||`, `&&`) or ternary (`? :`), the branches create alternative evaluation paths. If a node
+reference appears in all paths, the dependency is hard. If it appears in only some paths, the
+dependency is lazy for that expression. A node that is referenced as hard in any expression on the
+consumer is a hard dependency; a node that is only ever referenced lazily is a lazy dependency.
+
+Both hard and lazy dependencies are edges in the same dependency graph — cycles involving either type
+are rejected. The distinction affects two behaviors:
+
+| Behavior              | Hard | Lazy |
+| --------------------- | ---- | ---- |
+| Dispatch ordering     | Yes  | No   |
+| Contagious exclusion  | Yes  | No   |
+
+Everything else is identical. Both kinds produce dependency paths that feed the input-hash. Both
+create edges in the dependents index for propagation triggering. Both participate in the output-hash
+via self-paths pushed down from dependency paths.
+
+A hard dependency gates dispatch — the consumer waits for the dependency to complete before
+evaluating. A lazy dependency does not gate — the consumer evaluates when its hard dependencies are
+satisfied. If the lazy dependency hasn't completed, the expression takes the branch that doesn't
+need it. When the lazy dependency later completes, the output-hash change triggers the consumer for
+re-evaluation through the standard propagation mechanism.
+
+Contagious exclusion propagates only through hard dependencies. If a hard dependency is Excluded, the
+consumer cannot evaluate (every path needs the data) and is also Excluded. A lazy dependency being
+Excluded does not exclude the consumer — the expression takes the fallback branch.
+
 ## CEL Functions
 
 Any object in scope exposes functions maintained by the graph controller.

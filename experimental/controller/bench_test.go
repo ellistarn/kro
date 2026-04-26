@@ -308,7 +308,7 @@ func BenchmarkExtractReferencedPaths(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_, _, _, _, _ = graph.ExtractReferencedPathsFromNode(node, exprPaths)
+		_, _, _, _ = graph.ExtractReferencedPathsFromNode(node, exprPaths)
 	}
 }
 
@@ -533,7 +533,7 @@ func propagateStateLinearScan(ps *dagpkg.PlanState, dag *dagpkg.DAG, sourceID st
 		if ps.States[node.ID] != dagpkg.NodeUnvisited {
 			continue
 		}
-		if node.Dependencies[sourceID] {
+		if _, ok := node.Dependencies[sourceID]; ok {
 			ps.States[node.ID] = targetState
 			propagateStateLinearScan(ps, dag, node.ID, targetState)
 		}
@@ -833,7 +833,7 @@ func benchForEachCached(b *testing.B, itemCount int) {
 	prevItemsRaw := buildForEachItems(itemCount)
 	prevItemsRaw[0].(map[string]any)["data"].(map[string]any)["key"] = "changed-value"
 
-	deps := map[string]bool{"source": true}
+	deps := map[string]graph.DepKind{"source": graph.DepHard}
 	scope := map[string]any{"source": map[string]any{"list": prevItemsRaw}}
 	ctxHash := hashForEachContext(scope, deps)
 

@@ -41,7 +41,10 @@ scope, revision, and watches.
 Nodes communicate through a scope — the graph's resolved data keyed by node ID. After a node is
 resolved, its output is published to the scope. Scope is the single source of data for template
 evaluation, readyWhen, propagateWhen, and includeWhen — if it's not in scope, the expression can't
-see it. Workers receive read-only views of the scope containing only their dependencies' outputs.
+see it. Workers receive read-only views of the scope containing their dependencies' outputs. Hard
+dependencies are always present (the node waited for them). Lazy dependencies are included when
+available — if the lazy dependency completed before the consumer was dispatched, its data is in the
+snapshot. Otherwise, the entry is absent and the expression takes the branch that doesn't need it.
 
 ### Node States
 
@@ -85,7 +88,7 @@ A node is **triggered** when:
 - its resync timer has expired
 - the node changed in the latest compilation
 
-A node enters the frontier when all its dependencies have been processed AND either:
+A node enters the frontier when all its hard dependencies have been processed AND either:
 
 - a dependency's output changed (propagation trigger), or
 - the node is triggered
@@ -98,11 +101,14 @@ nodes that re-evaluate to the same state cause no churn.
 At each frontier node:
 
 1. **Dependencies**
-   - any dep Excluded → Excluded
-   - any dep Blocked/Error/Conflict/SystemError → Blocked
-   - any dep Pending → Pending
+   - any hard dep Excluded → Excluded
+   - any hard dep Blocked/Error/Conflict/SystemError → Blocked
+   - any hard dep Pending → Pending
    - Precedence: Excluded > Blocked > Pending. Excluded is definitive — the dependency is
      intentionally absent, so the node cannot evaluate regardless of other dependencies' states.
+   - Lazy dependencies do not participate in exclusion or blocking. A lazy dependency that is
+     Excluded or in an error state does not affect the consumer — the expression has a branch
+     that handles the absent case.
 
 2. **propagateWhen**
    - The node's propagateWhen unsatisfied → skip. Previous evaluation and state retained. If never
@@ -141,7 +147,7 @@ At each frontier node:
 6. **Result changed**
    - Evaluate readyWhen → Ready or NotReady. Publish to scope.
    - output-hash == previous → dependents don't enter the frontier
-   - output-hash != previous → dependents enter the frontier (propagation trigger)
+   - output-hash != previous → all dependents enter the frontier (propagation trigger)
 
 Three hashes at progressively deeper layers: input-hash (step 3) skips template evaluation,
 apply-hash (step 5) skips the write, output-hash (step 6) determines propagation.

@@ -29,6 +29,23 @@ import (
 // revision.
 type NodeType int
 
+// DepKind classifies a dependency edge. The classification is determined by
+// AST analysis at compile time: at each short-circuit operator (||, &&) or
+// ternary (? :), branches create alternative evaluation paths. If a node
+// reference appears in all paths, the dependency is Hard. If it appears in
+// only some paths, it is Lazy.
+type DepKind int
+
+const (
+	// DepHard — every evaluation path requires the target's data. Gates
+	// dispatch ordering and contagious exclusion.
+	DepHard DepKind = iota
+	// DepLazy — at least one evaluation path produces a result without the
+	// target's data. Participates in propagation triggering only — no
+	// dispatch ordering, no contagious exclusion.
+	DepLazy
+)
+
 const (
 	// NodeTypeTemplate — the Graph creates the resource. Applied via SSA.
 	// Tracked for cleanup. Deleted on prune.
@@ -199,9 +216,13 @@ type Node struct {
 	ReadyWhen     []string // CEL conditions; all must be true for the node to be "ready"
 	PropagateWhen []string // CEL conditions; input gate — all must be true for this node to evaluate
 
-	// Dependencies are IDs of nodes this node references in its CEL expressions.
-	// Populated by BuildDAG; nil before that.
-	Dependencies map[string]bool
+	// Dependencies maps referenced node IDs to their dependency kind.
+	// A hard dependency gates dispatch and contagious exclusion — every
+	// evaluation path requires the data. A lazy dependency participates
+	// in propagation triggering only — at least one evaluation path can
+	// produce a result without the data. Populated by BuildDAG; nil
+	// before that.
+	Dependencies map[string]DepKind
 
 	// DepPaths maps each dependency to the field paths this node's CEL
 	// expressions reference. Populated by BuildDAG; nil before that.
@@ -211,11 +232,6 @@ type Node struct {
 	// resource that readyWhen, propagateWhen, and downstream expressions
 	// reference. Populated by BuildDAG; nil before that.
 	SelfPaths []FieldPath
-
-	// ReadinessDeps is the set of upstream node IDs whose readiness state
-	// must be checked even when the evaluation hash matches. Populated by
-	// BuildDAG; nil before that.
-	ReadinessDeps map[string]bool
 }
 
 // NodeType returns the parse-time classification of this node.
