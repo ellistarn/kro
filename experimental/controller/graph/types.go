@@ -30,19 +30,20 @@ import (
 type NodeType int
 
 // DepKind classifies a dependency edge. The classification is determined by
-// AST analysis at compile time: at each short-circuit operator (||, &&) or
-// ternary (? :), branches create alternative evaluation paths. If a node
-// reference appears in all paths, the dependency is Hard. If it appears in
-// only some paths, it is Lazy.
+// AST analysis at compile time: a dependency accessed only through optional
+// patterns (?.field, [?index], .ready(), .updated()) across all expressions
+// in the consumer is Lazy. If any expression accesses the dependency directly,
+// it is Hard.
 type DepKind int
 
 const (
 	// DepHard — every evaluation path requires the target's data. Gates
 	// dispatch ordering and contagious exclusion.
 	DepHard DepKind = iota
-	// DepLazy — at least one evaluation path produces a result without the
-	// target's data. Participates in propagation triggering only — no
-	// dispatch ordering, no contagious exclusion.
+	// DepLazy — all evaluation paths access the target through optional
+	// patterns. The scope value is optional.of(data) when present,
+	// optional.none() when absent. Participates in propagation triggering
+	// only — no dispatch ordering, no contagious exclusion.
 	DepLazy
 )
 

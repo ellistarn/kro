@@ -49,7 +49,7 @@ func TestSetStateDoesNotPropagate(t *testing.T) {
 		{ID: "b", Template: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "b"}, "data": map[string]any{"ref": "${a.metadata.name}"}}},
 		{ID: "c", Template: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "c"}, "data": map[string]any{"ref": "${b.metadata.name}"}}},
 	}
-	dag, err := dagpkg.BuildDAG(nodes, nil)
+	dag, err := dagpkg.BuildDAG(nodes, nil, nil)
 	require.NoError(t, err)
 
 	states := []dagpkg.NodeState{dagpkg.NodeExcluded, dagpkg.NodeError, dagpkg.NodePending, dagpkg.NodeConflict, dagpkg.NodeSystemError, dagpkg.NodeReady, dagpkg.NodeNotReady}
@@ -74,7 +74,7 @@ func TestSummaryCountsBlockedState(t *testing.T) {
 		{ID: "a", Template: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "a"}}},
 		{ID: "b", Template: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "b"}, "data": map[string]any{"ref": "${a.metadata.name}"}}},
 	}
-	dag, err := dagpkg.BuildDAG(nodes, nil)
+	dag, err := dagpkg.BuildDAG(nodes, nil, nil)
 	require.NoError(t, err)
 
 	plan := dagpkg.NewPlanState(dag)
@@ -143,7 +143,7 @@ func TestTryDispatchPrecedence_ExcludedOverBlockedOverPending(t *testing.T) {
 		{ID: "b", Template: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "b"}}},
 		{ID: "c", Template: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "c"}, "data": map[string]any{"a": "${a.metadata.name}", "b": "${b.metadata.name}"}}},
 	}
-	dag, err := dagpkg.BuildDAG(nodes, nil)
+	dag, err := dagpkg.BuildDAG(nodes, nil, nil)
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -212,7 +212,7 @@ func TestPruneOrderReverseDependency(t *testing.T) {
 		{ID: "b", Template: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "b"}, "data": map[string]any{"ref": "${a.metadata.name}"}}},
 		{ID: "c", Template: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "c"}, "data": map[string]any{"ref": "${b.metadata.name}"}}},
 	}
-	dag, err := dagpkg.BuildDAG(nodes, nil)
+	dag, err := dagpkg.BuildDAG(nodes, nil, nil)
 	require.NoError(t, err)
 
 	keys := []string{
@@ -237,7 +237,7 @@ func TestPruneOrderUnmatchedKeysFirst(t *testing.T) {
 	nodes := []graphpkg.Node{
 		{ID: "a", Template: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "a"}}},
 	}
-	dag, err := dagpkg.BuildDAG(nodes, nil)
+	dag, err := dagpkg.BuildDAG(nodes, nil, nil)
 	require.NoError(t, err)
 
 	keys := []string{
@@ -259,7 +259,7 @@ func TestPruneOrderContributeKeysResolved(t *testing.T) {
 		{ID: "a", Template: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "a"}}},
 		{ID: "b", Template: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "b"}, "data": map[string]any{"ref": "${a.metadata.name}"}}},
 	}
-	dag, err := dagpkg.BuildDAG(nodes, nil)
+	dag, err := dagpkg.BuildDAG(nodes, nil, nil)
 	require.NoError(t, err)
 
 	keys := []string{

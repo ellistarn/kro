@@ -106,16 +106,26 @@ func CopyScope(scope map[string]any) map[string]any {
 
 // ExtractReferencedPathsFromNode scans a Node's template and gate expressions
 // for ${...} blocks, looks up pre-extracted field paths from exprPaths, and
-// returns per-node dependency paths, self paths, readiness deps, and dependency IDs.
+// returns per-node dependency paths, self paths, and dependency classifications.
 //
 // When exprPaths is nil (e.g., BuildDAG called for deletion ordering without
 // going through compileGraphSpec), falls back to string-based dependency
 // detection. DepPaths/SelfPaths will be nil in this case — hashing won't be
 // available, but dependency detection for topological sort still works.
 //
+// exprAccessModes carries per-expression, per-scope-variable optional-access
+// classification computed from pre-rewrite CEL ASTs. When non-nil, it drives
+// DepKind classification: a dependency accessed only through optional patterns
+// (?.field, .ready(), .updated()) in ALL expressions is DepLazy. When nil,
+// all dependencies default to DepHard.
+//
 // The exprPaths map is computed from CEL ASTs during compilation in
 // compileGraphSpec. See 005-reconciliation.md § Hash Mechanics.
-func ExtractReferencedPathsFromNode(node Node, exprPaths map[string]map[string][]FieldPath) (
+func ExtractReferencedPathsFromNode(
+	node Node,
+	exprPaths map[string]map[string][]FieldPath,
+	exprAccessModes map[string]map[string]bool,
+) (
 	dependencies map[string]DepKind,
 	depPaths map[string][]FieldPath,
 	selfPaths []FieldPath,
@@ -124,9 +134,9 @@ func ExtractReferencedPathsFromNode(node Node, exprPaths map[string]map[string][
 	dependencies = map[string]DepKind{}
 	depPaths = map[string][]FieldPath{}
 
-	// Helper: process a CEL expression's pre-extracted paths.
-	// When exprPaths is nil, falls back to string-based identifier extraction
-	// for dependency detection (no field paths available).
+	// Helper: process a CEL expression's pre-extracted paths and access modes.
+	// Field paths (from post-rewrite ASTs) drive hash mechanics.
+	// Access modes (from pre-rewrite ASTs) drive DepKind classification.
 	processExpr := func(expr string, isGateExpr bool) {
 		if exprPaths == nil {
 			// Fallback: string-based dependency detection only.
@@ -136,80 +146,54 @@ func ExtractReferencedPathsFromNode(node Node, exprPaths map[string]map[string][
 			}
 			return
 		}
-		paths, ok := exprPaths[expr]
-		if !ok {
-			return
-		}
-		for scopeVar, fieldPaths := range paths {
-			if scopeVar == node.ID {
-				// Self-reference — only meaningful in gate expressions
-				if isGateExpr {
-					for _, fp := range fieldPaths {
-						AddFieldPath(&selfPaths, fp)
-					}
-				}
-				continue
-			}
-			// Upstream dependency reference. When the only field paths
-			// are ["__ready"], the dependency classification comes from
-			// checkReadyRef (DepLazy for .ready() in branch expressions).
-			// Only set DepHard when non-ready paths are present.
-			allReadyOnly := true
-			for _, fp := range fieldPaths {
-				if len(fp) != 1 || fp[0] != "__ready" {
-					allReadyOnly = false
-					break
-				}
-			}
-			if !allReadyOnly {
-				dependencies[scopeVar] = DepHard
-			}
-			for _, fp := range fieldPaths {
-				AddPath(depPaths, scopeVar, fp)
-			}
-		}
-	}
 
-	// Helper: find all .ready() targets in an expression and register
-	// them as lazy dependencies. .ready() calls appear inside ternary
-	// or short-circuit expressions that have fallback branches — the
-	// expression can produce a result without the target's data. The
-	// lazy dependency ensures the consumer is in the target's Dependents
-	// for propagation triggering, without gating dispatch or causing
-	// negative state propagation.
-	//
-	// The field path walker extracts ["__ready"] for .ready() targets,
-	// and processExpr skips DepHard for __ready-only paths — so this
-	// function's DepLazy classification takes effect.
-	checkReadyRef := func(expr string) {
-		remaining := expr
-		for {
-			idx := strings.Index(remaining, ".ready()")
-			if idx < 0 {
-				return
+		// Register field paths from the post-rewrite AST.
+		if paths, ok := exprPaths[expr]; ok {
+			for scopeVar, fieldPaths := range paths {
+				if scopeVar == node.ID {
+					if isGateExpr {
+						for _, fp := range fieldPaths {
+							AddFieldPath(&selfPaths, fp)
+						}
+					}
+					continue
+				}
+				for _, fp := range fieldPaths {
+					AddPath(depPaths, scopeVar, fp)
+				}
 			}
-			// Walk backwards from the dot to find the identifier.
-			end := idx
-			start := end
-			for start > 0 && isIdentContinue(remaining[start-1]) {
-				start--
-			}
-			if start < end && isIdentStart(remaining[start]) {
-				id := remaining[start:end]
-				// Filter CEL keywords/builtins
-				switch id {
-				case "true", "false", "null", "size", "has", "exists", "all",
-					"filter", "map", "int", "uint", "double", "string", "bool",
-					"bytes", "list", "type", "duration", "timestamp":
-				default:
-					if id != node.ID {
-						if existing, exists := dependencies[id]; !exists || existing == DepLazy {
-							dependencies[id] = DepLazy
+		}
+
+		// Classify DepKind from access modes (pre-rewrite AST).
+		// A scope variable accessed only through optional patterns in ALL
+		// expressions → DepLazy. Any direct access → DepHard.
+		if exprAccessModes != nil {
+			if modes, ok := exprAccessModes[expr]; ok {
+				for scopeVar, optionalOnly := range modes {
+					if scopeVar == node.ID {
+						continue
+					}
+					if !optionalOnly {
+						// Direct access in this expression → hard.
+						dependencies[scopeVar] = DepHard
+					} else {
+						// Optional-only in this expression. Set DepLazy if not
+						// already hard from another expression.
+						if _, exists := dependencies[scopeVar]; !exists {
+							dependencies[scopeVar] = DepLazy
 						}
 					}
 				}
 			}
-			remaining = remaining[idx+len(".ready()"):]
+		} else {
+			// No access modes — default all deps to hard (safe fallback).
+			if paths, ok := exprPaths[expr]; ok {
+				for scopeVar := range paths {
+					if scopeVar != node.ID {
+						dependencies[scopeVar] = DepHard
+					}
+				}
+			}
 		}
 	}
 
@@ -272,7 +256,6 @@ func ExtractReferencedPathsFromNode(node Node, exprPaths map[string]map[string][
 				continue
 			}
 			processExpr(expr, false)
-			checkReadyRef(expr) // .ready() creates dependency for ordering + re-triggering
 			checkDepsRef(expr)
 			if err != nil {
 				return
@@ -280,11 +263,7 @@ func ExtractReferencedPathsFromNode(node Node, exprPaths map[string]map[string][
 		}
 	}
 
-	// Process readyWhen + propagateWhen → depPaths + selfPaths
-	// With lazy evaluation, .ready() calls in gate expressions no longer
-	// create hard dependencies. The gate evaluates .ready() against
-	// whatever's in scope — if the target hasn't been dispatched,
-	// .ready() returns false, and the gate blocks.
+	// Process readyWhen + propagateWhen → depPaths + selfPaths.
 	var gateStrs []string
 	for _, s := range node.ReadyWhen {
 		gateStrs = append(gateStrs, s)
@@ -305,7 +284,6 @@ func ExtractReferencedPathsFromNode(node Node, exprPaths map[string]map[string][
 				continue
 			}
 			processExpr(expr, true)
-			checkReadyRef(expr) // gate: hard dep needed for re-triggering
 			checkDepsRef(expr)
 			if err != nil {
 				return

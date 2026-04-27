@@ -56,7 +56,7 @@ func celPluralFunction() []cel.EnvOption {
 // forEach parents whose readiness is aggregated from children's per-item
 // __ready stamping. Per 001-graph.md § readyWhen.
 func celReadyFunction() []cel.EnvOption {
-	impl := func(val ref.Val) ref.Val {
+	readyConcreteImpl := func(val ref.Val) ref.Val {
 		native, err := conversion.GoNativeType(val)
 		if err != nil {
 			return types.Bool(false)
@@ -86,11 +86,27 @@ func celReadyFunction() []cel.EnvOption {
 			return types.Bool(false)
 		}
 	}
+	impl := func(val ref.Val) ref.Val {
+		// Handle optional receiver: when a lazy dependency is
+		// optional.none() (absent), .ready() returns concrete false.
+		// When present, .ready() unwraps and checks the inner value.
+		// .ready() absorbs optionality — it always returns a concrete
+		// bool, never optional(bool). This lets expressions like
+		// `a.ready() && b.ready() ? 'ACTIVE' : 'IN_PROGRESS'` work
+		// regardless of whether the deps are hard or lazy.
+		if opt, ok := val.(*types.Optional); ok {
+			if !opt.HasValue() {
+				return types.Bool(false) // absent dep → not ready
+			}
+			return readyConcreteImpl(opt.GetValue())
+		}
+		return readyConcreteImpl(val)
+	}
 	return []cel.EnvOption{
 		cel.Function("ready",
 			cel.MemberOverload("dyn_ready",
 				[]*cel.Type{cel.DynType},
-				cel.BoolType,
+				cel.DynType, // was BoolType — now DynType so .orValue() compiles on the result
 				cel.UnaryBinding(impl),
 			),
 		),
@@ -258,7 +274,7 @@ func injectConditionsSchema(statusSchema map[string]any) {
 // have __updated == true — the collection's updated state is a function of
 // its children.
 func celUpdatedFunction() []cel.EnvOption {
-	impl := func(val ref.Val) ref.Val {
+	updatedConcreteImpl := func(val ref.Val) ref.Val {
 		native, err := conversion.GoNativeType(val)
 		if err != nil {
 			return types.Bool(false)
@@ -288,11 +304,22 @@ func celUpdatedFunction() []cel.EnvOption {
 			return types.Bool(false)
 		}
 	}
+	impl := func(val ref.Val) ref.Val {
+		// Handle optional receiver: absorb optionality, return concrete bool.
+		// Absent dep → not updated (false). Same rationale as .ready().
+		if opt, ok := val.(*types.Optional); ok {
+			if !opt.HasValue() {
+				return types.Bool(false) // absent dep → not updated
+			}
+			return updatedConcreteImpl(opt.GetValue())
+		}
+		return updatedConcreteImpl(val)
+	}
 	return []cel.EnvOption{
 		cel.Function("updated",
 			cel.MemberOverload("dyn_updated",
 				[]*cel.Type{cel.DynType},
-				cel.BoolType,
+				cel.DynType, // was BoolType — now DynType so .orValue() compiles on the result
 				cel.UnaryBinding(impl),
 			),
 		),

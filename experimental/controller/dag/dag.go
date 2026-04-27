@@ -95,10 +95,13 @@ func (t *Topology) NodeDeps(idx int) map[string]graph.DepKind {
 // exprPaths contains pre-extracted field paths from CEL ASTs (computed during
 // compilation in compileGraphSpec). These replace string-scanning with AST-walked
 // field paths per 005-reconciliation.md § Hash Mechanics.
+// exprAccessModes contains per-expression, per-scope-variable access mode
+// classification from pre-rewrite CEL ASTs. Drives DepKind: optional-only
+// access → DepLazy, any direct access → DepHard. Nil means all deps are hard.
 // Returns an error if the dependency graph contains a cycle (ErrCircularDependency).
 // Topological order is computed via Kahn's algorithm with a min-heap keyed by
 // declaration index, so independent nodes preserve their spec.nodes ordering.
-func BuildDAG(nodes []graph.Node, exprPaths map[string]map[string][]graph.FieldPath) (*DAG, error) {
+func BuildDAG(nodes []graph.Node, exprPaths map[string]map[string][]graph.FieldPath, exprAccessModes map[string]map[string]bool) (*DAG, error) {
 	topo := &Topology{
 		Index:             make(map[string]int, len(nodes)),
 		NodeTypes:         make(map[string]graph.NodeType),
@@ -116,7 +119,7 @@ func BuildDAG(nodes []graph.Node, exprPaths map[string]map[string][]graph.FieldP
 
 	for i, node := range nodes {
 		var err error
-		node.Dependencies, node.DepPaths, node.SelfPaths, err = graph.ExtractReferencedPathsFromNode(node, exprPaths)
+		node.Dependencies, node.DepPaths, node.SelfPaths, err = graph.ExtractReferencedPathsFromNode(node, exprPaths, exprAccessModes)
 		if err != nil {
 			return nil, err
 		}

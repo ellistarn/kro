@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/cel-go/common/types"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/kubernetes-sigs/kro/experimental/controller/compiler"
@@ -502,30 +503,29 @@ func (e *evaluator) snapshotFor(node *graph.Node, state *instanceState) *evaluat
 			}
 		}
 	}
-	// Include lazy dep data. Lazy deps didn't gate dispatch — the
-	// expression has a branch that handles absent data. If the
-	// coordinator has their data (they completed before this node was
-	// dispatched), include real values. If not in the current scope but
-	// available from the previous reconcile, use that — it's the best
-	// available data until the dep is re-evaluated in this walk.
-	// Otherwise, provide empty-map fallbacks so .ready() returns false
-	// and field-path access returns data-pending instead of a CEL
-	// "no such attribute" error.
+	// Include lazy dep data as CEL optional values. Per 005-reconciliation.md:
+	// "Lazy dependencies are always in scope as optional values."
+	// Present lazy deps → optional.of(value), absent → optional.none().
+	//
+	// Present values are shallow-copied before wrapping. The coordinator
+	// may call markReady/markUpdated on the same underlying map after the
+	// worker starts — a concurrent map write vs. the worker's CEL read
+	// through the Optional's DynMap wrapper. Copying eliminates the race.
 	for depID, kind := range node.Dependencies {
 		if kind == graph.DepLazy {
 			if _, exists := snap[depID]; exists {
 				continue
 			}
 			if v, ok := e.scope[depID]; ok {
-				snap[depID] = v
+				snap[depID] = types.OptionalOf(types.DefaultTypeAdapter.NativeToValue(shallowCopyScope(v)))
 			} else if state != nil {
 				if prev, ok := state.previousScope[depID]; ok {
-					snap[depID] = prev
+					snap[depID] = types.OptionalOf(types.DefaultTypeAdapter.NativeToValue(shallowCopyScope(prev)))
 				} else {
-					snap[depID] = map[string]any{}
+					snap[depID] = types.OptionalNone
 				}
 			} else {
-				snap[depID] = map[string]any{}
+				snap[depID] = types.OptionalNone
 			}
 		}
 	}
@@ -603,4 +603,27 @@ func (e *evaluator) snapshotFor(node *graph.Node, state *instanceState) *evaluat
 	}
 
 	return worker
+}
+
+// shallowCopyScope copies a scope value so that the worker's snapshot is
+// independent of the coordinator's scope. For maps, it copies the top-level
+// entries (enough to prevent races from markReady/markUpdated which write
+// top-level keys like __ready and __updated). For slices, it copies the
+// element references. Other types are returned as-is (immutable or not
+// subject to concurrent modification).
+func shallowCopyScope(v any) any {
+	switch val := v.(type) {
+	case map[string]any:
+		cp := make(map[string]any, len(val))
+		for k, v := range val {
+			cp[k] = v
+		}
+		return cp
+	case []any:
+		cp := make([]any, len(val))
+		copy(cp, val)
+		return cp
+	default:
+		return v
+	}
 }

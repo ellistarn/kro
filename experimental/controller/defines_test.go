@@ -40,7 +40,7 @@ func TestDefinesCycleDetection(t *testing.T) {
 			},
 		}, graphpkg.NodeTypeTemplate),
 	}
-	_, err := dagpkg.BuildDAG(nodes, nil)
+	_, err := dagpkg.BuildDAG(nodes, nil, nil)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, compiler.ErrDependencyError)
 }
@@ -64,7 +64,7 @@ func TestDefinesChain(t *testing.T) {
 			},
 		}, graphpkg.NodeTypeTemplate),
 	}
-	dag, err := dagpkg.BuildDAG(nodes, nil)
+	dag, err := dagpkg.BuildDAG(nodes, nil, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, 3, len(dag.Levels))

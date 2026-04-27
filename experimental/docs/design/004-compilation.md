@@ -113,8 +113,11 @@ assignment compatibility. Two node types require special handling:
   Nodes referencing CRDs not yet created resolve when the CRD appears
   (see [Compilation Cache](#compilation-cache)).
 - **Lazy dependencies** are optional in the evaluation context. The compiler registers `.ready()` and
-  `.updated()` with overloads for both concrete and optional receivers. A concrete receiver returns
-  `bool`. An optional receiver returns `optional(bool)` — the author unwraps with `.orValue()`.
+  `.updated()` with overloads for both concrete and optional receivers. Both overloads return
+  concrete `bool` — the methods absorb optionality. On an absent (optional.none) receiver, they
+  return `false`. This lets branch expressions like `a.ready() && b.ready() ? x : y` work
+  regardless of whether the deps are hard or lazy. Field access uses CEL's native optional types:
+  `deployment.?status.?replicas.orValue(0)` for lazy deps.
 
 Field paths are (node, field chain) pairs: `${deploy.status.replicas}` yields
 `(deploy, status.replicas)`. When a chain contains a dynamic operation, the path terminates at the

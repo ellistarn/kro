@@ -158,7 +158,7 @@ func BenchmarkBuildDAG(b *testing.B) {
 			b.ResetTimer()
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				_, err := dagpkg.BuildDAG(nodes, nil)
+				_, err := dagpkg.BuildDAG(nodes, nil, nil)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -308,7 +308,7 @@ func BenchmarkExtractReferencedPaths(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_, _, _, _ = graph.ExtractReferencedPathsFromNode(node, exprPaths)
+		_, _, _, _ = graph.ExtractReferencedPathsFromNode(node, exprPaths, nil)
 	}
 }
 
@@ -510,7 +510,7 @@ func BenchmarkPropagateState(b *testing.B) {
 	for _, nodeCount := range []int{10, 100, 1000} {
 		b.Run(fmt.Sprintf("nodes=%d", nodeCount), func(b *testing.B) {
 			nodes := buildBenchNodes(nodeCount)
-			dag, err := dagpkg.BuildDAG(nodes, nil)
+			dag, err := dagpkg.BuildDAG(nodes, nil, nil)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -549,7 +549,7 @@ func BenchmarkPropagateStateLinearScan(b *testing.B) {
 	for _, nodeCount := range []int{10, 100, 1000} {
 		b.Run(fmt.Sprintf("nodes=%d", nodeCount), func(b *testing.B) {
 			nodes := buildBenchNodes(nodeCount)
-			dag, err := dagpkg.BuildDAG(nodes, nil)
+			dag, err := dagpkg.BuildDAG(nodes, nil, nil)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -1048,7 +1048,7 @@ func TestResolveCollectionSource(t *testing.T) {
 				t.Fatalf("compileGraphSpec: %v", err)
 			}
 			// Build a full DAG to access CollectionSource (set during dagpkg.BuildDAG).
-			dag, err := dagpkg.BuildDAG(spec.Nodes, compiled.ExprPaths)
+			dag, err := dagpkg.BuildDAG(spec.Nodes, compiled.ExprPaths, compiled.ExprAccessModes)
 			if err != nil {
 				t.Fatalf("dagpkg.BuildDAG: %v", err)
 			}

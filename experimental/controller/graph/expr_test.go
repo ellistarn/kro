@@ -5,8 +5,9 @@ import (
 )
 
 // TestExtractReferencedPaths_ReadyInBody verifies that .ready() calls in
-// body expressions create lazy dependencies. Lazy deps participate in
-// propagation triggering but not dispatch ordering or contagious exclusion.
+// body expressions are detected as dependencies. With the string-based
+// fallback (nil exprPaths/exprAccessModes), only the first identifier is
+// extracted. Full lazy classification requires AST analysis at compile time.
 func TestExtractReferencedPaths_ReadyInBody(t *testing.T) {
 	node := Node{
 		ID: "rgdInstanceStatus",
@@ -17,7 +18,7 @@ func TestExtractReferencedPaths_ReadyInBody(t *testing.T) {
 		},
 	}
 
-	deps, _, _, err := ExtractReferencedPathsFromNode(node, nil)
+	deps, _, _, err := ExtractReferencedPathsFromNode(node, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -27,9 +28,10 @@ func TestExtractReferencedPaths_ReadyInBody(t *testing.T) {
 	if deps["deployment1"] != DepHard {
 		t.Error("deployment1 should be a hard dependency (string fallback)")
 	}
-	// deployment2 is a lazy dep via checkReadyRef (not extracted by processExpr).
-	if deps["deployment2"] != DepLazy {
-		t.Error("deployment2 should be a lazy dependency (.ready() in body)")
+	// deployment2 is not detected by string fallback (only first identifier).
+	// Full lazy classification requires AST-based exprAccessModes from compilation.
+	if _, exists := deps["deployment2"]; exists {
+		t.Error("deployment2 should not appear in string-fallback mode (only first identifier extracted)")
 	}
 }
 
@@ -45,7 +47,7 @@ func TestExtractReferencedPaths_ReadyInBody_Single(t *testing.T) {
 		},
 	}
 
-	deps, _, _, err := ExtractReferencedPathsFromNode(node, nil)
+	deps, _, _, err := ExtractReferencedPathsFromNode(node, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -67,7 +69,7 @@ func TestExtractReferencedPaths_ReadySelfReference(t *testing.T) {
 		},
 	}
 
-	deps, _, _, err := ExtractReferencedPathsFromNode(node, nil)
+	deps, _, _, err := ExtractReferencedPathsFromNode(node, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -89,7 +91,7 @@ func TestExtractReferencedPaths_ReadyInGate(t *testing.T) {
 		PropagateWhen: []string{"${deployment.ready()}"},
 	}
 
-	deps, _, _, err := ExtractReferencedPathsFromNode(node, nil)
+	deps, _, _, err := ExtractReferencedPathsFromNode(node, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -113,7 +115,7 @@ func TestExtractReferencedPaths_DependenciesSelfOnly(t *testing.T) {
 		PropagateWhen: []string{"${service.dependencies().all(d, d.ready())}"},
 	}
 
-	_, _, _, err := ExtractReferencedPathsFromNode(node, nil)
+	_, _, _, err := ExtractReferencedPathsFromNode(node, nil, nil)
 	if err != nil {
 		t.Fatalf("self-referential .dependencies() should be allowed: %v", err)
 	}
@@ -125,7 +127,7 @@ func TestExtractReferencedPaths_DependenciesSelfOnly(t *testing.T) {
 		},
 	}
 
-	_, _, _, err = ExtractReferencedPathsFromNode(node, nil)
+	_, _, _, err = ExtractReferencedPathsFromNode(node, nil, nil)
 	if err == nil {
 		t.Fatal("cross-node .dependencies() should be rejected")
 	}
@@ -133,7 +135,8 @@ func TestExtractReferencedPaths_DependenciesSelfOnly(t *testing.T) {
 
 // TestExtractReferencedPaths_ReadyCELBuiltinFiltered verifies that CEL
 // builtins like "all", "filter", "map" before .ready() are not treated
-// as node IDs.
+// as node IDs. In string-fallback mode, comprehension variables like "d"
+// are not detected — full classification requires AST-based analysis.
 func TestExtractReferencedPaths_ReadyCELBuiltinFiltered(t *testing.T) {
 	node := Node{
 		ID: "status",
@@ -142,7 +145,7 @@ func TestExtractReferencedPaths_ReadyCELBuiltinFiltered(t *testing.T) {
 		},
 	}
 
-	deps, _, _, err := ExtractReferencedPathsFromNode(node, nil)
+	deps, _, _, err := ExtractReferencedPathsFromNode(node, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -150,9 +153,9 @@ func TestExtractReferencedPaths_ReadyCELBuiltinFiltered(t *testing.T) {
 	if _, exists := deps["list"]; exists {
 		t.Error("CEL builtin 'list' should be filtered by ExtractFirstIdentifier")
 	}
-	// "d" is a loop variable — the string scanner can't distinguish it
-	// from a node ID. checkReadyRef adds it as a lazy dep.
-	if deps["d"] != DepLazy {
-		t.Error("expected 'd' as lazy dep (string scanner can't resolve comprehension variables)")
+	// "d" is a loop variable — string fallback can't detect it. Full
+	// classification requires AST-based exprAccessModes from compilation.
+	if _, exists := deps["d"]; exists {
+		t.Error("'d' should not appear in string-fallback mode")
 	}
 }
