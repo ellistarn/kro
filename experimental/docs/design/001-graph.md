@@ -341,45 +341,28 @@ consumer waits for each dependency to be in scope before evaluating.
 
 ## Lazy Evaluation
 
-A status patch that reports a condition needs to evaluate before all dependencies have been
-processed:
-
-```yaml
-- id: deployment
-  template: ...
-
-- id: appStatus
-  patch:
-    status:
-      conditions:
-        - type: DeploymentReady
-          status: ${deployment.ready() ? 'True' : 'Unknown'}
-          message: ${deployment.ready() ? 'Deployment available' : 'Waiting for deployment'}
-```
-
-`appStatus` depends on `deployment`. By default, it waits — the condition doesn't exist until
-`deployment` is in scope. With lazy evaluation, the condition reports `Unknown` / `'Waiting for
-deployment'` immediately and flips to `True` when deployment becomes ready.
+An expression that can produce a result without a dependency's data does not need to wait for it.
+The consumer evaluates with available data and uses a declared default for absent dependencies.
 
 CEL supports partial evaluation. When a dependency's data is absent, the controller marks it as
 unknown in the evaluation context. CEL's logical operators are commutative with unknowns:
 
 - `unknown || true` → `true`
 - `unknown && false` → `false`
-- `true || unknown` → `true`
-- `false && unknown` → `false`
 
-Expressions using `&&`/`||` can resolve without all inputs present.
-
-Ternary conditions and field access cannot. `deployment.ready() ? 'True' : 'Unknown'` with
-`deployment` unknown produces an unknown result — the ternary requires a concrete condition. The
-`lazy()` function bridges this gap:
+Expressions using `&&`/`||` can resolve without all inputs present. Ternary conditions and field
+access cannot — `deployment.ready() ? 'True' : 'Unknown'` with `deployment` unknown produces an
+unknown result, not `'Unknown'`. The ternary requires a concrete condition. The `lazy()` function
+bridges this gap:
 
 - **`lazy(expr, default)`** — evaluates `expr`. If the result is absent — the dependency has not been
   processed, is Excluded, or is in an error state — returns `default`. Otherwise returns the result
   of `expr`.
 
 ```yaml
+- id: deployment
+  template: ...
+
 - id: appStatus
   patch:
     status:
@@ -391,13 +374,18 @@ Ternary conditions and field access cannot. `deployment.ready() ? 'True' : 'Unkn
             : 'Waiting for deployment'}
 ```
 
-`lazy(deployment.ready(), false)` returns `false` when `deployment` is absent. The ternary evaluates
-to `'Unknown'`. When `deployment` later completes and becomes ready, the change triggers
-re-evaluation and the condition flips to `'True'`.
+`appStatus` depends on `deployment`. Without `lazy()`, it waits — the condition doesn't exist until
+`deployment` is in scope. With `lazy()`, the condition reports `Unknown` / `'Waiting for deployment'`
+immediately and flips to `True` when deployment becomes ready.
 
-A dependency referenced outside any `lazy()` call is hard — the consumer waits. A dependency
-referenced only inside `lazy()` calls is lazy — the consumer proceeds without it. A dependency that
-appears both inside and outside `lazy()` is hard.
+A lazy dependency changes how the consumer participates in the graph walk. A hard dependency gates
+dispatch — the consumer waits. A lazy dependency does not — the consumer evaluates when its hard
+dependencies are satisfied, regardless of whether lazy dependencies are present. A lazy dependency in
+a negative state (Excluded, Error, Conflict, SystemError) does not propagate to the consumer —
+`lazy()` returns the default. When a lazy dependency later completes, the consumer re-evaluates.
+
+A dependency referenced outside any `lazy()` call is hard. A dependency referenced only inside
+`lazy()` calls is lazy. A dependency that appears both inside and outside `lazy()` is hard.
 
 ## Nested Graphs
 
