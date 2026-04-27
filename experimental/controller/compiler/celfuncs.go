@@ -106,7 +106,7 @@ func celReadyFunction() []cel.EnvOption {
 		cel.Function("ready",
 			cel.MemberOverload("dyn_ready",
 				[]*cel.Type{cel.DynType},
-				cel.DynType, // was BoolType — now DynType so .orValue() compiles on the result
+				cel.BoolType,
 				cel.UnaryBinding(impl),
 			),
 		),
@@ -319,7 +319,7 @@ func celUpdatedFunction() []cel.EnvOption {
 		cel.Function("updated",
 			cel.MemberOverload("dyn_updated",
 				[]*cel.Type{cel.DynType},
-				cel.DynType, // was BoolType — now DynType so .orValue() compiles on the result
+				cel.BoolType,
 				cel.UnaryBinding(impl),
 			),
 		),

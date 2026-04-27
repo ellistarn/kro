@@ -225,7 +225,6 @@ func resolveOptionalSelectChain(e celast.Expr, comprehensionVars map[string]bool
 //   - _?._ (OptSelect) with scope var as first arg
 //   - _[?_] (OptIndex) with scope var as first arg
 //   - .ready() / .updated() member calls with scope var as target
-//   - .ready().orValue() / .updated().orValue() chains
 //
 // Direct access: regular Select, bare Ident, or any other use.
 // This classification drives DepKind: optional-only across ALL expressions → DepLazy.
@@ -293,31 +292,6 @@ func classifyAccessModes(expr celast.Expr, scopeVars map[string]bool, comprehens
 				}
 				walk(call.Args()[0])
 				return
-			}
-
-			// .orValue() wrapping .ready()/.updated() → optional access.
-			// Pattern: deployment.ready().orValue(false) — the .orValue()
-			// is redundant (.ready() already absorbs optionality) but
-			// harmless. Classify as optional.
-			if call.IsMemberFunction() && call.FunctionName() == "orValue" {
-				if target := call.Target(); target != nil && target.Kind() == celast.CallKind {
-					inner := target.AsCall()
-					if inner.IsMemberFunction() &&
-						(inner.FunctionName() == "ready" || inner.FunctionName() == "updated") {
-						if innerTarget := inner.Target(); innerTarget != nil &&
-							innerTarget.Kind() == celast.IdentKind {
-							root := innerTarget.AsIdent()
-							if scopeVars[root] && (comprehensionVars == nil || !comprehensionVars[root]) {
-								markAccess(root, true) // optional: .ready().orValue()
-								for _, arg := range call.Args() {
-									walk(arg) // walk the default value for any refs
-								}
-								return
-							}
-						}
-					}
-				}
-				// Not the .ready()/.updated().orValue() pattern — fall through.
 			}
 
 			// .ready() / .updated() member calls with scope var as target.

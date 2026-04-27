@@ -357,21 +357,22 @@ data natively — `?` for field access, `.orValue()` for defaults:
     status:
       conditions:
         - type: DeploymentReady
-          status: ${deployment.ready().orValue(false) ? 'True' : 'Unknown'}
-          message: ${deployment.ready().orValue(false)
+          status: ${deployment.ready() ? 'True' : 'Unknown'}
+          message: ${deployment.ready()
             ? 'Deployment available'
             : 'Waiting for deployment'}
       replicas: ${deployment.?status.?availableReplicas.orValue(0)}
 ```
 
-`appStatus` evaluates immediately. While `deployment` is absent, `.orValue()` returns the default —
-the condition reports `Unknown`. When `deployment` completes and becomes ready, the consumer
-re-evaluates and the condition flips to `True`.
+`appStatus` evaluates immediately. While `deployment` is absent, `.ready()` returns `false` — the
+condition reports `Unknown`, and `.orValue()` returns the default replicas (`0`). When `deployment`
+completes and becomes ready, the consumer re-evaluates and the condition flips to `True`.
 
 A lazy dependency does not make the consumer wait — it evaluates when its hard dependencies are
-satisfied, regardless of whether lazy dependencies are present. If a lazy dependency is in a negative
-state, the consumer is unaffected — `.orValue()` returns the default. When a lazy dependency later
-completes, the consumer re-evaluates.
+satisfied, regardless of whether lazy dependencies are present. `.ready()` and `.updated()` absorb
+optionality — they return `false` for absent dependencies. Field access uses CEL optional types:
+`.?field.orValue(default)` returns the default when the dependency is absent. When a lazy dependency
+later completes, the consumer re-evaluates.
 
 The compiler infers which dependencies are lazy from the expression syntax — a dependency accessed
 only through `?` and `.orValue()` is lazy, a dependency accessed directly is hard.
