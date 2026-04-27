@@ -329,9 +329,6 @@ Any object in scope exposes functions maintained by the graph controller.
   Enables `${node.dependencies().all(d, d.ready())}` — gate until every dependency is ready without
   naming them.
 
-When the receiver is an optional value (a lazy dependency), `.ready()` and `.updated()` return
-`optional(bool)`. The author unwraps with `.orValue()`.
-
 ## Dependencies
 
 Dependencies are inferred from CEL expression references. If node B's template contains
