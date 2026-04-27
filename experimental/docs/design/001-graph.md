@@ -341,23 +341,9 @@ consumer waits for each dependency to be in scope before evaluating.
 
 ## Lazy Evaluation
 
-An expression that can produce a result without a dependency's data does not need to wait for it.
-The consumer evaluates with available data and uses a declared default for absent dependencies.
-
-CEL supports partial evaluation. When a dependency's data is absent, the controller marks it as
-unknown in the evaluation context. CEL's logical operators are commutative with unknowns:
-
-- `unknown || true` → `true`
-- `unknown && false` → `false`
-
-Expressions using `&&`/`||` can resolve without all inputs present. Ternary conditions and field
-access cannot — `deployment.ready() ? 'True' : 'Unknown'` with `deployment` unknown produces an
-unknown result, not `'Unknown'`. The ternary requires a concrete condition. The `lazy()` function
-bridges this gap:
-
-- **`lazy(expr, default)`** — evaluates `expr`. If the result is absent — the dependency has not been
-  processed, is Excluded, or is in an error state — returns `default`. Otherwise returns the result
-  of `expr`.
+A node that depends on another waits for it before evaluating. Some expressions have a meaningful
+value even when a dependency is absent — a status condition can report `Unknown` while a deployment
+is being created. `lazy()` declares a default for when a dependency's data is not available:
 
 ```yaml
 - id: deployment
@@ -374,18 +360,26 @@ bridges this gap:
             : 'Waiting for deployment'}
 ```
 
-`appStatus` depends on `deployment`. Without `lazy()`, it waits — the condition doesn't exist until
-`deployment` is in scope. With `lazy()`, the condition reports `Unknown` / `'Waiting for deployment'`
-immediately and flips to `True` when deployment becomes ready.
+`appStatus` evaluates immediately. While `deployment` is absent, `lazy(deployment.ready(), false)`
+returns `false` and the condition reports `Unknown`. When `deployment` completes and becomes ready,
+the consumer re-evaluates and the condition flips to `True`.
 
-A lazy dependency changes how the consumer participates in the graph walk. A hard dependency gates
-dispatch — the consumer waits. A lazy dependency does not — the consumer evaluates when its hard
-dependencies are satisfied, regardless of whether lazy dependencies are present. A lazy dependency in
-a negative state (Excluded, Error, Conflict, SystemError) does not propagate to the consumer —
-`lazy()` returns the default. When a lazy dependency later completes, the consumer re-evaluates.
+- **`lazy(expr, default)`** — evaluates `expr`. If the result is absent — the dependency has not been
+  processed, is Excluded, or is in an error state — returns `default`. Otherwise returns the result
+  of `expr`.
 
-A dependency referenced outside any `lazy()` call is hard. A dependency referenced only inside
-`lazy()` calls is lazy. A dependency that appears both inside and outside `lazy()` is hard.
+CEL supports partial evaluation. When a dependency's data is absent, it is marked as unknown in the
+evaluation context. Logical operators are commutative with unknowns — `unknown || true` produces
+`true`, `unknown && false` produces `false`. Expressions using `&&`/`||` can resolve without all
+inputs present. Ternary conditions and field access cannot —
+`deployment.ready() ? 'True' : 'Unknown'` with `deployment` unknown produces an unknown result. The
+ternary requires a concrete condition. `lazy()` bridges this gap by providing a concrete default when
+the dependency is absent.
+
+A lazy dependency does not gate dispatch — the consumer evaluates when its hard dependencies are
+satisfied, regardless of whether lazy dependencies are present. A lazy dependency in a negative state
+(Excluded, Error, Conflict, SystemError) does not propagate to the consumer — `lazy()` returns the
+default. When a lazy dependency later completes, the consumer re-evaluates.
 
 ## Nested Graphs
 
