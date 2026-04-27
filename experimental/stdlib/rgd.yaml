@@ -56,7 +56,7 @@ spec:
 
     - id: watchRgds
       includeWhen:
-        - ${has(rgdCrd.status) && has(rgdCrd.status.conditions) && rgdCrd.status.conditions.exists(c, c.type == 'Established' && c.status == 'True')}
+        - ${rgdCrd.?status.?conditions.orValue([]).exists(c, c.type == 'Established' && c.status == 'True')}
       watch:
         apiVersion: kro.run/v1alpha1
         kind: ResourceGraphDefinition
@@ -91,9 +91,9 @@ spec:
 
             - id: checks
               def:
-                resources: '$${has(schema.spec) && has(schema.spec.resources) ? schema.spec.resources : []}'
+                resources: '$${schema.?spec.?resources.orValue([])}'
                 reserved: '$${["apiVersion","context","dependency","dependencies","each","externalRef","externalReference","externalRefs","externalReferences","graph","instance","item","items","kind","kro","metadata","namespace","object","resource","resourcegraphdefinition","resourceGraphDefinition","resources","root","runtime","schema","self","serviceAccountName","spec","status","this","variables","vars","version"]}'
-                allIDs: '$${has(schema.spec) && has(schema.spec.resources) ? schema.spec.resources.map(r, r.id) : []}'
+                allIDs: '$${schema.?spec.?resources.orValue([]).map(r, r.id)}'
 
             - id: validation
               def:
@@ -109,7 +109,7 @@ spec:
                     ? {"valid": false, "message": "forEach iterator is a reserved keyword"}
                     : checks.resources.exists(r, has(r.forEach) && r.forEach.size() > 0 && r.forEach.exists(d, d.exists(k, checks.allIDs.exists(id, id == k))))
                     ? {"valid": false, "message": "forEach iterator conflicts with resource ID"}
-                    : has(schema.spec) && has(schema.spec.schema) && has(schema.spec.schema.status) && schema.spec.schema.status.size() > 0 && schema.spec.schema.status.exists(k, !string(schema.spec.schema.status[k]).contains("${"))
+                    : schema.?spec.?schema.?status.orValue({}).size() > 0 && schema.spec.schema.status.exists(k, !string(schema.spec.schema.status[k]).contains("${"))
                     ? {"valid": false, "message": "failed to build instance status schema: status fields without expressions are not supported"}
                     : {"valid": true, "message": ""}
                   }
@@ -122,8 +122,8 @@ spec:
                 kind: CustomResourceDefinition
                 metadata:
                   name: $${plural(schema.spec.schema.kind).lowerAscii()}.$${schema.spec.schema.group}
-                  labels: '$${has(schema.spec.schema.metadata) && has(schema.spec.schema.metadata.labels) ? schema.spec.schema.metadata.labels : {}}'
-                  annotations: '$${has(schema.spec.schema.metadata) && has(schema.spec.schema.metadata.annotations) ? schema.spec.schema.metadata.annotations : {}}'
+                  labels: '$${schema.?spec.?schema.?metadata.?labels.orValue({})}'
+                  annotations: '$${schema.?spec.?schema.?metadata.?annotations.orValue({})}'
                 spec:
                   group: $${schema.spec.schema.group}
                   names:
@@ -138,11 +138,11 @@ spec:
                         status: {}
                       schema:
                         openAPIV3Schema: '$${simpleSchema.toOpenAPI(schema.spec.schema, has(schema.spec.resources) ? schema.spec.resources : [])}'
-                      additionalPrinterColumns: '$${has(schema.spec.schema.additionalPrinterColumns) ? schema.spec.schema.additionalPrinterColumns : []}'
+                      additionalPrinterColumns: '$${schema.?spec.?schema.?additionalPrinterColumns.orValue([])}'
 
             - id: watchInstances
               includeWhen:
-                - $${has(crd.status) && has(crd.status.conditions) && crd.status.conditions.exists(c, c.type == 'Established' && c.status == 'True')}
+                - $${crd.?status.?conditions.orValue([]).exists(c, c.type == 'Established' && c.status == 'True')}
               watch:
                 apiVersion: $${schema.spec.schema.group}/$${schema.spec.schema.apiVersion}
                 kind: $${schema.spec.schema.kind}
@@ -235,7 +235,7 @@ spec:
                               "lastTransitionTime": instance.metadata.creationTimestamp
                             }
                           ]
-                        }.merge(has(schema.spec.schema.status) ? schema.spec.schema.status : {})
+                        }.merge(schema.?spec.?schema.?status.orValue({}))
                       }}]
                     }
 
@@ -248,7 +248,7 @@ spec:
                   name: $${schema.metadata.name}
                 status:
                   state: '$${validation.result.valid && crd.ready() ? "Active" : "Inactive"}'
-                  topologicalOrder: '$${validation.result.valid ? (has(schema.spec.resources) ? schema.spec.resources.map(r, r.id) : []) : []}'
+                  topologicalOrder: '$${validation.result.valid ? schema.?spec.?resources.orValue([]).map(r, r.id) : []}'
                   conditions:
                     - type: Ready
                       status: '$${validation.result.valid && crd.ready() ? "True" : "False"}'
@@ -286,8 +286,7 @@ spec:
       forceApply: true
       patch: >-
         ${
-          has(graph.status) && has(graph.status.conditions)
-          && graph.status.conditions.exists(c, c.type == "Compiled" && c.status == "False")
+          graph.?status.?conditions.orValue([]).exists(c, c.type == "Compiled" && c.status == "False")
           ? {
               "apiVersion": "kro.run/v1alpha1",
               "kind": "ResourceGraphDefinition",
@@ -310,8 +309,7 @@ spec:
                 ]
               }
             }
-          : has(graph.status) && has(graph.status.conditions)
-            && graph.status.conditions.exists(c, c.type == "Compiled" && c.status == "True")
+          : graph.?status.?conditions.orValue([]).exists(c, c.type == "Compiled" && c.status == "True")
           ? {
               "apiVersion": "kro.run/v1alpha1",
               "kind": "ResourceGraphDefinition",
