@@ -371,11 +371,10 @@ data natively — `?` for field access, `.orValue()` for defaults:
 `deployment.?status.?availableReplicas.orValue(0)` returns `0` when deployment is absent and the
 actual replica count when present.
 
-A lazy dependency does not gate dispatch — the consumer evaluates when its hard dependencies are
-satisfied, regardless of whether lazy dependencies are present. A lazy dependency in a negative state
-(Excluded, Error, Conflict, SystemError) does not propagate to the consumer — the optional is empty
-and `.orValue()` returns the default. When a lazy dependency later completes, the consumer
-re-evaluates.
+A lazy dependency does not make the consumer wait — it evaluates when its hard dependencies are
+satisfied, regardless of whether lazy dependencies are present. If a lazy dependency is in a negative
+state, the consumer is unaffected — the optional is empty and `.orValue()` returns the default. When
+a lazy dependency later completes, the consumer re-evaluates.
 
 ## Nested Graphs
 
