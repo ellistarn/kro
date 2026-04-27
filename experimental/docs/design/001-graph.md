@@ -322,44 +322,41 @@ includeWhen toggle, or forEach scale-down.
 
 ## Dependencies
 
-A node depends on properties of other nodes. When an expression references a field —
-`${A.metadata.name}`, `${A.status.availableReplicas}`, `${A.ready()}` — the compiler extracts a
-**field path**: the node and the chain of fields accessed. `${deploy.status.replicas}` yields the
-field path `(deploy, status.replicas)`. `${deploy.ready()}` yields `(deploy, ready)`. `.ready()` is
-a property of a node like any other — it produces a field path through the same mechanism as
-`status.replicas` or `metadata.name`.
-
-Field paths are the dependency primitive. They are the unit of change detection — the reconcile loop
-reads each path from the dependency's current state and hashes the value. When the value changes, the
-consumer is triggered for re-evaluation (see
-[005-reconciliation § Hash Mechanics](005-reconciliation.md#hash-mechanics)). When the value is
-absent — the node hasn't been processed, or the field hasn't been populated — absent is distinct
-from any concrete value. Absent to present is a change, not a skip.
-
-Data at a field path evolves. A Deployment's `status.availableReplicas` starts at zero and rises as
-pods schedule. A node's `.ready()` starts false and becomes true when readyWhen passes. The mechanism
-doesn't distinguish why data changed — status convergence, spec mutation, readiness transition — it
-detects that the value at the path is different and triggers the consumer. One mechanism for all
-forms of change.
+Dependencies are inferred from CEL expression references. If node B's template contains
+`${A.metadata.name}`, B depends on A. When a dependency's output changes — status convergence, spec
+mutation, readiness transition — the consumer is re-evaluated. The controller does not distinguish
+why data changed; it detects that the output is different and triggers dependents. See
+[005-reconciliation § Hash Mechanics](005-reconciliation.md#hash-mechanics) for the change detection
+mechanism.
 
 The dependency graph must be acyclic — cycles are rejected at compile time. Nodes with no dependency
 relationship are independent and processed in parallel.
 
 ### Hard and Lazy
 
-A dependency is classified as **hard** or **lazy** based on the expression's branch structure:
+A dependency is **hard** when the expression cannot produce a result without the dependency's data.
+`${A.metadata.name}` — A must be in scope. A dependency is **lazy** when the author declares a
+fallback for absent data using `lazy()`. `${lazy(A.ready(), false)}` — if A is absent, `lazy()`
+returns `false`, and the expression produces a result either way.
 
-- **Hard** — every evaluation path through the expression accesses the dependency.
-  `${A.metadata.name}` — no branch avoids A. `${A.ready()}` without a fallback branch — A is
-  accessed on the only path.
-- **Lazy** — at least one evaluation path produces a result without accessing the dependency.
-  `${A.ready() ? 'ACTIVE' : 'PENDING'}` — the false branch does not access A.
+```yaml
+# Hard — deployment must be in scope before service evaluates
+- id: service
+  template:
+    metadata:
+      name: ${deployment.metadata.name}-svc
 
-The classification is determined by AST analysis at compile time. At each short-circuit operator
-(`||`, `&&`) or ternary (`? :`), the branches create alternative evaluation paths. A dependency that
-appears in all paths is hard. A dependency that appears in only some paths is lazy for that
-expression. A node that is referenced as hard in any expression on the consumer is a hard dependency
-overall; a node that is only ever referenced lazily is a lazy dependency.
+# Lazy — deployment may or may not be in scope
+- id: status
+  patch:
+    status:
+      phase: ${lazy(deployment.ready(), false) ? 'ACTIVE' : 'PENDING'}
+      replicas: ${lazy(deployment.status.replicas, 0)}
+```
+
+Classification is determined at compile time. A dependency referenced outside any `lazy()` call — in
+any expression on the consumer — is hard. A dependency referenced only inside `lazy()` calls is lazy.
+A dependency that appears both inside and outside `lazy()` is hard (the non-lazy reference governs).
 
 Both hard and lazy dependencies are edges in the same graph — cycles involving either type are
 rejected. The distinction affects two walk behaviors:
@@ -369,31 +366,35 @@ rejected. The distinction affects two walk behaviors:
 | Dispatch ordering          | Yes  | No   |
 | Negative state propagation | Yes  | No   |
 
-Everything else is identical. Both kinds produce field paths for change detection. Both create edges
-for propagation triggering. Both participate in output change detection.
+Everything else is identical. Both create edges for change-driven re-evaluation.
 
 A hard dependency gates dispatch — the consumer waits for the dependency to complete before
 evaluating. A lazy dependency does not gate — the consumer evaluates when its hard dependencies are
 satisfied. If the lazy dependency hasn't completed, its data is absent from the consumer's scope, and
-the expression takes the branch that doesn't need it. When the lazy dependency later completes, the
-change in its field path values triggers the consumer for re-evaluation through the standard
-propagation mechanism.
+`lazy()` returns the declared default. When the lazy dependency later completes, the consumer is
+re-evaluated.
 
 Negative state propagation flows only through hard dependencies. If a hard dependency is Excluded,
 the consumer cannot evaluate (every path needs the data) and is also Excluded. If a hard dependency
 is in an error state (Error, Conflict, SystemError), the consumer is Blocked. A lazy dependency in
-any non-evaluable state does not affect the consumer — the expression has a branch that handles the
-absent case.
+any negative state does not affect the consumer — the `lazy()` fallback handles the absent case.
 
 ## CEL Functions
 
 Any object in scope exposes functions maintained by the graph controller.
 
-- **`.ready()`** — true when the node is applied and its readyWhen conditions pass.
+- **`.ready()`** — true when the node is applied and its readyWhen conditions pass. False otherwise.
 - **`.updated()`** — true when the node is on the latest graph generation.
 - **`.dependencies()`** — returns the scope values of all dependency nodes as a list.
   Enables `${node.dependencies().all(d, d.ready())}` — gate until every dependency is ready without
   naming them.
+
+The controller provides one global function:
+
+- **`lazy(expr, default)`** — evaluates `expr`. If the result is absent — the dependency has not been
+  processed, is Excluded, or is in an error state — returns `default`. Otherwise returns the result
+  of `expr`. The presence of `lazy()` in an expression is what makes a dependency lazy — see
+  [Dependencies § Hard and Lazy](#hard-and-lazy).
 
 ## Nested Graphs
 

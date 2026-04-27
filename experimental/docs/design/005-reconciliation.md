@@ -42,9 +42,10 @@ Nodes communicate through a scope — the graph's resolved data keyed by node ID
 resolved, its output is published to the scope. Scope is the single source of data for template
 evaluation, readyWhen, propagateWhen, and includeWhen — if it's not in scope, the expression can't
 see it. Workers receive read-only views of the scope containing their dependencies' outputs. Hard
-dependencies are always present (the node waited for them). Lazy dependencies are included when
-available — if the lazy dependency completed before the consumer was dispatched, its data is in the
-scope view. Otherwise, the entry is absent and the expression takes the branch that doesn't need it.
+dependencies are always present in the view (the node waited for them). Lazy dependencies are
+included when their data is available at dispatch time — if the lazy dependency resolved with data
+before the consumer was dispatched, it appears in the scope view. Otherwise, the entry is absent and
+`lazy()` returns the declared default.
 
 ### Node States
 
@@ -107,8 +108,8 @@ At each frontier node:
    - Precedence: Excluded > Blocked > Pending. Excluded is definitive — the dependency is
      intentionally absent, so the node cannot evaluate regardless of other dependencies' states.
    - Lazy dependencies do not participate in exclusion or blocking. A lazy dependency that is
-     Excluded or in an error state does not affect the consumer — the expression has a branch
-     that handles the absent case.
+     Excluded or in an error state does not affect the consumer — the `lazy()` fallback handles
+     the absent case.
 
 2. **propagateWhen**
    - The node's propagateWhen unsatisfied → skip. Previous evaluation and state retained. If never
@@ -464,3 +465,17 @@ removes that flexibility. readyWhen produces the signal, propagateWhen on the co
 references the parent collection, which includes sibling state. Concurrent evaluation against a
 static snapshot produces incorrect budget enforcement — all children see the same state and all
 dispatch. Sequential evaluation with aggregate updates after each dispatch is required.
+
+**CEL partial evaluation as the sole absent-data mechanism.** CEL's partial evaluation resolves
+unknowns through commutative `&&`/`||` — `unknown || true` produces `true` — but not through
+ternary conditions or strict function calls. `A.ready() ? X : Y` with A unknown produces unknown;
+the ternary does not evaluate both branches. A non-strict function is needed to convert the unknown
+to a concrete value before the ternary evaluates. `lazy()` is that function. Partial evaluation may
+be used at compile time to validate that expressions containing `lazy()` produce concrete results
+when lazy dependencies are absent.
+
+**Implicit lazy classification via partial evaluation.** Evaluate every expression with each
+dependency marked unknown; if the result is concrete, classify as lazy automatically. Removes the
+need for authors to write `lazy()`. But it hides a behavioral change — the author doesn't see that a
+dependency is lazy, and the graph's dispatch ordering changes silently based on expression structure.
+`lazy()` makes the behavioral contract visible in the spec.
