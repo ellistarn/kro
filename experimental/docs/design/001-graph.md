@@ -320,6 +320,16 @@ includeWhen toggle, or forEach scale-down.
     - ${snapshot.status.readyToUse == true}
 ```
 
+## CEL Functions
+
+Any object in scope exposes functions maintained by the graph controller.
+
+- **`.ready()`** — true when the node is applied and its readyWhen conditions pass. False otherwise.
+- **`.updated()`** — true when the node is on the latest graph generation.
+- **`.dependencies()`** — returns the scope values of all dependency nodes as a list.
+  Enables `${node.dependencies().all(d, d.ready())}` — gate until every dependency is ready without
+  naming them.
+
 ## Dependencies
 
 Dependencies are inferred from CEL expression references. If node B's template contains
@@ -330,14 +340,29 @@ why data changed; it detects that the output is different and triggers dependent
 mechanism.
 
 The dependency graph must be acyclic — cycles are rejected at compile time. Nodes with no dependency
-relationship are independent and processed in parallel.
+relationship are independent and processed in parallel. All dependencies are hard by default — the
+consumer cannot evaluate until every dependency has completed.
 
-### Hard and Lazy
+## Lazy Evaluation
 
-A dependency is **hard** when the expression cannot produce a result without the dependency's data.
-`${A.metadata.name}` — A must be in scope. A dependency is **lazy** when the author declares a
-fallback for absent data using `lazy()`. `${lazy(A.ready(), false)}` — if A is absent, `lazy()`
-returns `false`, and the expression produces a result either way.
+By default, a dependency must be in scope before the consumer evaluates. `${A.metadata.name}` — A
+must have completed. This is the right default: most expressions need their dependency's data.
+
+Some expressions can produce a meaningful result without a dependency's data. A status reporter that
+shows `'PENDING'` when a deployment hasn't been processed yet. A replicas counter that defaults to
+`0`. These expressions have a natural fallback — they don't need to wait.
+
+CEL's partial evaluation handles some of this natively. Logical operators are commutative with
+unknowns — `unknown || true` produces `true`, `unknown && false` produces `false`. When a
+dependency's data is absent, expressions using only `&&`/`||` can resolve without intervention.
+
+Ternary conditions and field access cannot — `A.ready() ? 'ACTIVE' : 'PENDING'` with A absent
+produces an unknown result, not `'PENDING'`. The ternary requires a concrete condition. For these
+cases, the `lazy()` function provides an explicit fallback:
+
+- **`lazy(expr, default)`** — evaluates `expr`. If the result is absent — the dependency has not been
+  processed, is Excluded, or is in an error state — returns `default`. Otherwise returns the result
+  of `expr`.
 
 ```yaml
 # Hard — deployment must be in scope before service evaluates
@@ -354,9 +379,17 @@ returns `false`, and the expression produces a result either way.
       replicas: ${lazy(deployment.status.replicas, 0)}
 ```
 
-Classification is determined at compile time. A dependency referenced outside any `lazy()` call — in
-any expression on the consumer — is hard. A dependency referenced only inside `lazy()` calls is lazy.
-A dependency that appears both inside and outside `lazy()` is hard (the non-lazy reference governs).
+A common pattern is `lazy(dep.ready(), false)` — gate on readiness with a false default. `.ready()`
+returns true when a node is applied and its readyWhen conditions pass. When the dependency is absent,
+`lazy()` returns `false`, and the expression takes the fallback path. When the dependency later
+completes and becomes ready, the change triggers re-evaluation.
+
+### Classification
+
+A dependency referenced outside any `lazy()` call — in any expression on the consumer — is hard. A
+dependency referenced only inside `lazy()` calls is lazy. A dependency that appears both inside and
+outside `lazy()` is hard (the non-lazy reference governs). Classification is determined at compile
+time.
 
 Both hard and lazy dependencies are edges in the same graph — cycles involving either type are
 rejected. The distinction affects two walk behaviors:
@@ -375,26 +408,9 @@ satisfied. If the lazy dependency hasn't completed, its data is absent from the 
 re-evaluated.
 
 Negative state propagation flows only through hard dependencies. If a hard dependency is Excluded,
-the consumer cannot evaluate (every path needs the data) and is also Excluded. If a hard dependency
-is in an error state (Error, Conflict, SystemError), the consumer is Blocked. A lazy dependency in
-any negative state does not affect the consumer — the `lazy()` fallback handles the absent case.
-
-## CEL Functions
-
-Any object in scope exposes functions maintained by the graph controller.
-
-- **`.ready()`** — true when the node is applied and its readyWhen conditions pass. False otherwise.
-- **`.updated()`** — true when the node is on the latest graph generation.
-- **`.dependencies()`** — returns the scope values of all dependency nodes as a list.
-  Enables `${node.dependencies().all(d, d.ready())}` — gate until every dependency is ready without
-  naming them.
-
-The controller provides one global function:
-
-- **`lazy(expr, default)`** — evaluates `expr`. If the result is absent — the dependency has not been
-  processed, is Excluded, or is in an error state — returns `default`. Otherwise returns the result
-  of `expr`. The presence of `lazy()` in an expression is what makes a dependency lazy — see
-  [Dependencies § Hard and Lazy](#hard-and-lazy).
+the consumer cannot evaluate and is also Excluded. If a hard dependency is in an error state (Error,
+Conflict, SystemError), the consumer is Blocked. A lazy dependency in any negative state does not
+affect the consumer — the `lazy()` fallback handles the absent case.
 
 ## Nested Graphs
 
