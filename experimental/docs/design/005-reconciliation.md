@@ -43,9 +43,7 @@ resolved, its output is published to the scope. Scope is the single source of da
 evaluation, readyWhen, propagateWhen, and includeWhen — if it's not in scope, the expression can't
 see it. Workers receive read-only views of the scope containing their dependencies' outputs. Hard
 dependencies are always present in the view (the node waited for them). Lazy dependencies are
-included when their data is available at dispatch time — if the lazy dependency resolved with data
-before the consumer was dispatched, it appears in the scope view as `optional.of(object)`. Otherwise,
-the entry is `optional.none()` and `.orValue()` returns the declared default.
+optional — `optional.of(object)` when available at dispatch time, `optional.none()` otherwise.
 
 ### Node States
 
@@ -102,14 +100,12 @@ nodes that re-evaluate to the same state cause no churn.
 At each frontier node:
 
 1. **Dependencies**
-   - any hard dep Excluded → Excluded
-   - any hard dep Blocked/Error/Conflict/SystemError → Blocked
-   - any hard dep Pending → Pending
-   - Precedence: Excluded > Blocked > Pending. Excluded is definitive — the dependency is
-     intentionally absent, so the node cannot evaluate regardless of other dependencies' states.
-   - Lazy dependencies do not participate in exclusion or blocking. A lazy dependency that is
-     Excluded or in an error state does not affect the consumer — the optional is empty and
-     `.orValue()` returns the default.
+   - Lazy dependencies are resolved to their optional values — `optional.none()` if the dependency's
+     data is unavailable, `optional.of(object)` if available.
+   - If any remaining dependency is unavailable, the consumer inherits a state from that dependency
+     (see Node States → Dependents). Precedence: Excluded > Blocked > Pending. Excluded is
+     definitive — the dependency is intentionally absent, so the node cannot evaluate regardless of
+     other dependencies' states.
 
 2. **propagateWhen**
    - The node's propagateWhen unsatisfied → skip. Previous evaluation and state retained. If never
