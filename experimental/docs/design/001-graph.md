@@ -342,8 +342,8 @@ consumer waits for each dependency to be in scope before evaluating.
 ## Lazy Evaluation
 
 A node that depends on another waits for it before evaluating. Some expressions have a meaningful
-value even when a dependency is absent — a status condition can report `Unknown` while a deployment
-is being created.
+value even when a dependency is absent — a status condition can report `Unknown` while the nodes it
+depends on are still being resolved.
 
 Lazy dependencies are optional values in the evaluation context. CEL's optional types handle absent
 data natively — `?` for field access, `.orValue()` for defaults:
