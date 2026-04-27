@@ -373,6 +373,9 @@ satisfied, regardless of whether lazy dependencies are present. If a lazy depend
 state, the consumer is unaffected — `.orValue()` returns the default. When a lazy dependency later
 completes, the consumer re-evaluates.
 
+The compiler infers which dependencies are lazy from the expression syntax — a dependency accessed
+only through `?` and `.orValue()` is lazy, a dependency accessed directly is hard.
+
 ## Nested Graphs
 
 A Graph whose template contains another Graph creates a nested scope. The inner Graph is a regular

@@ -90,6 +90,13 @@ access in systems languages, the compiler cannot help -- the type information do
 dependency to dependent, both forward and reverse adjacency. Topological order is stable with
 respect to `spec.nodes` ordering. Cycles rejected.
 
+Each edge is classified as hard or lazy based on the expression syntax. A dependency accessed only
+through optional patterns (`?`, `.orValue()`) is lazy — the expression handles the absent case. A
+dependency accessed directly in any expression is hard. The classification is per-consumer: the same
+node can be a hard dependency of one consumer and a lazy dependency of another. The DAG records both
+edge types. Reconciliation uses the classification to determine scope construction (plain value vs
+optional) and frontier entry (hard deps only).
+
 **Compile in topological order.** For each node: resolve its type from the API server, compile its
 expressions against all upstream types (already resolved), then record the narrowed type in the
 artifact so the next node sees it.
