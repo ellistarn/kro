@@ -341,21 +341,25 @@ consumer waits for each dependency to be in scope before evaluating.
 
 ## Lazy Evaluation
 
-A status patch that reports graph state needs to evaluate before all dependencies have been
+A status patch that reports a condition needs to evaluate before all dependencies have been
 processed:
 
 ```yaml
 - id: deployment
   template: ...
 
-- id: status
+- id: appStatus
   patch:
     status:
-      phase: ${deployment.ready() ? 'ACTIVE' : 'PENDING'}
+      conditions:
+        - type: DeploymentReady
+          status: ${deployment.ready() ? 'True' : 'Unknown'}
+          message: ${deployment.ready() ? 'Deployment available' : 'Waiting for deployment'}
 ```
 
-`status` depends on `deployment`. By default, it waits. But the expression has a natural result when
-`deployment` is absent — `'PENDING'`.
+`appStatus` depends on `deployment`. By default, it waits — the condition doesn't exist until
+`deployment` is in scope. With lazy evaluation, the condition reports `Unknown` / `'Waiting for
+deployment'` immediately and flips to `True` when deployment becomes ready.
 
 CEL supports partial evaluation. When a dependency's data is absent, the controller marks it as
 unknown in the evaluation context. CEL's logical operators are commutative with unknowns:
@@ -367,7 +371,7 @@ unknown in the evaluation context. CEL's logical operators are commutative with 
 
 Expressions using `&&`/`||` can resolve without all inputs present.
 
-Ternary conditions and field access cannot. `deployment.ready() ? 'ACTIVE' : 'PENDING'` with
+Ternary conditions and field access cannot. `deployment.ready() ? 'True' : 'Unknown'` with
 `deployment` unknown produces an unknown result — the ternary requires a concrete condition. The
 `lazy()` function bridges this gap:
 
@@ -376,16 +380,20 @@ Ternary conditions and field access cannot. `deployment.ready() ? 'ACTIVE' : 'PE
   of `expr`.
 
 ```yaml
-- id: status
+- id: appStatus
   patch:
     status:
-      phase: ${lazy(deployment.ready(), false) ? 'ACTIVE' : 'PENDING'}
-      replicas: ${lazy(deployment.status.replicas, 0)}
+      conditions:
+        - type: DeploymentReady
+          status: ${lazy(deployment.ready(), false) ? 'True' : 'Unknown'}
+          message: ${lazy(deployment.ready(), false)
+            ? 'Deployment available'
+            : 'Waiting for deployment'}
 ```
 
 `lazy(deployment.ready(), false)` returns `false` when `deployment` is absent. The ternary evaluates
-to `'PENDING'`. When `deployment` later completes and becomes ready, the change triggers
-re-evaluation.
+to `'Unknown'`. When `deployment` later completes and becomes ready, the change triggers
+re-evaluation and the condition flips to `'True'`.
 
 A dependency referenced outside any `lazy()` call is hard — the consumer waits. A dependency
 referenced only inside `lazy()` calls is lazy — the consumer proceeds without it. A dependency that
