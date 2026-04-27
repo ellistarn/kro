@@ -240,8 +240,6 @@ spec:
                     }
 
             - id: rgdStatus
-              propagateWhen:
-                - '$${!validation.result.valid || crd.ready()}'
               forceApply: true
               patch:
                 apiVersion: kro.run/v1alpha1
@@ -249,12 +247,12 @@ spec:
                 metadata:
                   name: $${schema.metadata.name}
                 status:
-                  state: '$${validation.result.valid ? "Active" : "Inactive"}'
+                  state: '$${validation.result.valid && crd.ready() ? "Active" : "Inactive"}'
                   topologicalOrder: '$${validation.result.valid ? (has(schema.spec.resources) ? schema.spec.resources.map(r, r.id) : []) : []}'
                   conditions:
                     - type: Ready
-                      status: '$${validation.result.valid ? "True" : "False"}'
-                      reason: '$${validation.result.valid ? "Ready" : "Invalid"}'
+                      status: '$${validation.result.valid && crd.ready() ? "True" : "False"}'
+                      reason: '$${validation.result.valid && crd.ready() ? "Ready" : "Invalid"}'
                       message: '$${validation.result.valid ? "" : validation.result.message}'
                       observedGeneration: $${schema.metadata.generation}
                       lastTransitionTime: $${schema.metadata.creationTimestamp}
@@ -265,8 +263,8 @@ spec:
                       observedGeneration: $${schema.metadata.generation}
                       lastTransitionTime: $${schema.metadata.creationTimestamp}
                     - type: KindReady
-                      status: '$${validation.result.valid ? "True" : "False"}'
-                      reason: '$${validation.result.valid ? "Ready" : "Invalid"}'
+                      status: '$${validation.result.valid && crd.ready() ? "True" : "False"}'
+                      reason: '$${validation.result.valid && crd.ready() ? "Ready" : "Invalid"}'
                       message: '$${validation.result.valid ? "" : validation.result.message}'
                       observedGeneration: $${schema.metadata.generation}
                       lastTransitionTime: $${schema.metadata.creationTimestamp}
