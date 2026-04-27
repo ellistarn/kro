@@ -100,8 +100,9 @@ nodes that re-evaluate to the same state cause no churn.
 At each frontier node:
 
 1. **Dependencies**
-   - If any dependency is not in scope, the consumer cannot evaluate. The consumer inherits a state
-     from the unavailable dependency. Precedence: Excluded > Blocked > Pending.
+   - Lazy dependencies are always in scope as optional values. If any other dependency is not in
+     scope, the consumer cannot evaluate. The consumer inherits a state from the unavailable
+     dependency. Precedence: Excluded > Blocked > Pending.
 
 2. **propagateWhen**
    - The node's propagateWhen unsatisfied → skip. Previous evaluation and state retained. If never

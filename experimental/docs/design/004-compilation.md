@@ -112,6 +112,9 @@ assignment compatibility. Two node types require special handling:
   resolve when the reconciler evaluates the expression (see [Deferred Types](#deferred-types)).
   Nodes referencing CRDs not yet created resolve when the CRD appears
   (see [Compilation Cache](#compilation-cache)).
+- **Lazy dependencies** are optional in the evaluation context. The compiler registers `.ready()` and
+  `.updated()` with overloads for both concrete and optional receivers. A concrete receiver returns
+  `bool`. An optional receiver returns `optional(bool)` — the author unwraps with `.orValue()`.
 
 Field paths are (node, field chain) pairs: `${deploy.status.replicas}` yields
 `(deploy, status.replicas)`. When a chain contains a dynamic operation, the path terminates at the
