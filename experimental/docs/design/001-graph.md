@@ -329,6 +329,9 @@ Any object in scope exposes functions maintained by the graph controller.
   Enables `${node.dependencies().all(d, d.ready())}` — gate until every dependency is ready without
   naming them.
 
+When the receiver is an optional value (a lazy dependency), `.ready()` and `.updated()` return
+`optional(bool)`. The author unwraps with `.orValue()`.
+
 ## Dependencies
 
 Dependencies are inferred from CEL expression references. If node B's template contains
@@ -343,7 +346,10 @@ consumer waits for each dependency to be in scope before evaluating.
 
 A node that depends on another waits for it before evaluating. Some expressions have a meaningful
 value even when a dependency is absent — a status condition can report `Unknown` while a deployment
-is being created. `lazy()` declares a default for when a dependency's data is not available:
+is being created.
+
+Lazy dependencies are optional values in the evaluation context. CEL's optional types handle absent
+data natively — `?` for field access, `.orValue()` for defaults:
 
 ```yaml
 - id: deployment
@@ -354,32 +360,25 @@ is being created. `lazy()` declares a default for when a dependency's data is no
     status:
       conditions:
         - type: DeploymentReady
-          status: ${lazy(deployment.ready(), false) ? 'True' : 'Unknown'}
-          message: ${lazy(deployment.ready(), false)
+          status: ${deployment.ready().orValue(false) ? 'True' : 'Unknown'}
+          message: ${deployment.ready().orValue(false)
             ? 'Deployment available'
             : 'Waiting for deployment'}
+      replicas: ${deployment.?status.?availableReplicas.orValue(0)}
 ```
 
-`appStatus` evaluates immediately. While `deployment` is absent, `lazy(deployment.ready(), false)`
-returns `false` and the condition reports `Unknown`. When `deployment` completes and becomes ready,
-the consumer re-evaluates and the condition flips to `True`.
-
-- **`lazy(expr, default)`** — evaluates `expr`. If the result is absent — the dependency has not been
-  processed, is Excluded, or is in an error state — returns `default`. Otherwise returns the result
-  of `expr`.
-
-CEL supports partial evaluation. When a dependency's data is absent, it is marked as unknown in the
-evaluation context. Logical operators are commutative with unknowns — `unknown || true` produces
-`true`, `unknown && false` produces `false`. Expressions using `&&`/`||` can resolve without all
-inputs present. Ternary conditions and field access cannot —
-`deployment.ready() ? 'True' : 'Unknown'` with `deployment` unknown produces an unknown result. The
-ternary requires a concrete condition. `lazy()` bridges this gap by providing a concrete default when
-the dependency is absent.
+`appStatus` evaluates immediately. While `deployment` is absent, `deployment.ready()` returns
+`optional.none()` and `.orValue(false)` provides the default — the condition reports `Unknown`. When
+`deployment` completes and becomes ready, the consumer re-evaluates and the condition flips to
+`True`. Field access uses `?` to chain through the optional —
+`deployment.?status.?availableReplicas.orValue(0)` returns `0` when deployment is absent and the
+actual replica count when present.
 
 A lazy dependency does not gate dispatch — the consumer evaluates when its hard dependencies are
 satisfied, regardless of whether lazy dependencies are present. A lazy dependency in a negative state
-(Excluded, Error, Conflict, SystemError) does not propagate to the consumer — `lazy()` returns the
-default. When a lazy dependency later completes, the consumer re-evaluates.
+(Excluded, Error, Conflict, SystemError) does not propagate to the consumer — the optional is empty
+and `.orValue()` returns the default. When a lazy dependency later completes, the consumer
+re-evaluates.
 
 ## Nested Graphs
 

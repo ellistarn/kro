@@ -44,8 +44,8 @@ evaluation, readyWhen, propagateWhen, and includeWhen — if it's not in scope, 
 see it. Workers receive read-only views of the scope containing their dependencies' outputs. Hard
 dependencies are always present in the view (the node waited for them). Lazy dependencies are
 included when their data is available at dispatch time — if the lazy dependency resolved with data
-before the consumer was dispatched, it appears in the scope view. Otherwise, the entry is absent and
-`lazy()` returns the declared default.
+before the consumer was dispatched, it appears in the scope view as `optional.of(object)`. Otherwise,
+the entry is `optional.none()` and `.orValue()` returns the declared default.
 
 ### Node States
 
@@ -108,8 +108,8 @@ At each frontier node:
    - Precedence: Excluded > Blocked > Pending. Excluded is definitive — the dependency is
      intentionally absent, so the node cannot evaluate regardless of other dependencies' states.
    - Lazy dependencies do not participate in exclusion or blocking. A lazy dependency that is
-     Excluded or in an error state does not affect the consumer — the `lazy()` fallback handles
-     the absent case.
+     Excluded or in an error state does not affect the consumer — the optional is empty and
+     `.orValue()` returns the default.
 
 2. **propagateWhen**
    - The node's propagateWhen unsatisfied → skip. Previous evaluation and state retained. If never
@@ -466,16 +466,14 @@ references the parent collection, which includes sibling state. Concurrent evalu
 static snapshot produces incorrect budget enforcement — all children see the same state and all
 dispatch. Sequential evaluation with aggregate updates after each dispatch is required.
 
-**CEL partial evaluation as the sole absent-data mechanism.** CEL's partial evaluation resolves
-unknowns through commutative `&&`/`||` — `unknown || true` produces `true` — but not through
-ternary conditions or strict function calls. `A.ready() ? X : Y` with A unknown produces unknown;
-the ternary does not evaluate both branches. A non-strict function is needed to convert the unknown
-to a concrete value before the ternary evaluates. `lazy()` is that function. Partial evaluation may
-be used at compile time to validate that expressions containing `lazy()` produce concrete results
-when lazy dependencies are absent.
+**Custom `lazy()` function for absent-data handling.** A custom non-strict CEL function that catches
+unknown values and returns a default. Works but duplicates CEL's optional types library, which
+already provides `?` (optional field select), `.orValue()` (default on absent), and short-circuiting
+semantics. Optional types are built into CEL and handle the same cases without custom functions.
 
 **Implicit lazy classification via partial evaluation.** Evaluate every expression with each
 dependency marked unknown; if the result is concrete, classify as lazy automatically. Removes the
-need for authors to write `lazy()`. But it hides a behavioral change — the author doesn't see that a
-dependency is lazy, and the graph's dispatch ordering changes silently based on expression structure.
-`lazy()` makes the behavioral contract visible in the spec.
+need for authors to use optional syntax. But it hides a behavioral change — the author doesn't see
+that a dependency is lazy, and the graph's dispatch ordering changes silently based on expression
+structure. Optional types make the behavioral contract visible — `.orValue()` in the expression
+signals that the author expects the dependency might be absent.
