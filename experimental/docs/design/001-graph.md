@@ -151,8 +151,7 @@ node is a logical parent that aggregates child outputs. Each child is a real nod
 resource. Child identity is derived from the parent's ID combined with the rendered resource key
 (GVK + namespace + name).
 
-`.ready()` and `.updated()` on the parent aggregate with `.all()` — true when every child satisfies
-the condition.
+The parent is ready when all children are ready, and updated when all children are updated.
 
 For `def:` nodes, forEach produces an array of values instead of managed resources — no children
 are created.
@@ -324,7 +323,7 @@ includeWhen toggle, or forEach scale-down.
 
 Any object in scope exposes functions maintained by the graph controller.
 
-- **`.ready()`** — true when the node is applied and its readyWhen conditions pass. False otherwise.
+- **`.ready()`** — true when the node is applied and its readyWhen conditions pass.
 - **`.updated()`** — true when the node is on the latest graph generation.
 - **`.dependencies()`** — returns the scope values of all dependency nodes as a list.
   Enables `${node.dependencies().all(d, d.ready())}` — gate until every dependency is ready without
@@ -333,45 +332,50 @@ Any object in scope exposes functions maintained by the graph controller.
 ## Dependencies
 
 Dependencies are inferred from CEL expression references. If node B's template contains
-`${A.metadata.name}`, B depends on A. When a dependency's output changes — status convergence, spec
-mutation, readiness transition — the consumer is re-evaluated. The controller does not distinguish
-why data changed; it detects that the output is different and triggers dependents. See
-[005-reconciliation § Hash Mechanics](005-reconciliation.md#hash-mechanics) for the change detection
-mechanism.
+`${A.metadata.name}`, B depends on A. A consumer re-evaluates when the specific fields it depends on
+change — not on every change to the dependency.
 
 The dependency graph must be acyclic — cycles are rejected at compile time. Nodes with no dependency
 relationship are independent and processed in parallel. All dependencies are hard by default — the
-consumer cannot evaluate until every dependency has completed.
+consumer waits for each dependency to be in scope before evaluating.
 
 ## Lazy Evaluation
 
-By default, a dependency must be in scope before the consumer evaluates. `${A.metadata.name}` — A
-must have completed. This is the right default: most expressions need their dependency's data.
+A status patch that reports graph state needs to evaluate before all dependencies have been
+processed:
 
-Some expressions can produce a meaningful result without a dependency's data. A status reporter that
-shows `'PENDING'` when a deployment hasn't been processed yet. A replicas counter that defaults to
-`0`. These expressions have a natural fallback — they don't need to wait.
+```yaml
+- id: deployment
+  template: ...
 
-CEL's partial evaluation handles some of this natively. Logical operators are commutative with
-unknowns — `unknown || true` produces `true`, `unknown && false` produces `false`. When a
-dependency's data is absent, expressions using only `&&`/`||` can resolve without intervention.
+- id: status
+  patch:
+    status:
+      phase: ${deployment.ready() ? 'ACTIVE' : 'PENDING'}
+```
 
-Ternary conditions and field access cannot — `A.ready() ? 'ACTIVE' : 'PENDING'` with A absent
-produces an unknown result, not `'PENDING'`. The ternary requires a concrete condition. For these
-cases, the `lazy()` function provides an explicit fallback:
+`status` depends on `deployment`. By default, it waits. But the expression has a natural result when
+`deployment` is absent — `'PENDING'`.
+
+CEL supports partial evaluation. When a dependency's data is absent, the controller marks it as
+unknown in the evaluation context. CEL's logical operators are commutative with unknowns:
+
+- `unknown || true` → `true`
+- `unknown && false` → `false`
+- `true || unknown` → `true`
+- `false && unknown` → `false`
+
+Expressions using `&&`/`||` can resolve without all inputs present.
+
+Ternary conditions and field access cannot. `deployment.ready() ? 'ACTIVE' : 'PENDING'` with
+`deployment` unknown produces an unknown result — the ternary requires a concrete condition. The
+`lazy()` function bridges this gap:
 
 - **`lazy(expr, default)`** — evaluates `expr`. If the result is absent — the dependency has not been
   processed, is Excluded, or is in an error state — returns `default`. Otherwise returns the result
   of `expr`.
 
 ```yaml
-# Hard — deployment must be in scope before service evaluates
-- id: service
-  template:
-    metadata:
-      name: ${deployment.metadata.name}-svc
-
-# Lazy — deployment may or may not be in scope
 - id: status
   patch:
     status:
@@ -379,38 +383,13 @@ cases, the `lazy()` function provides an explicit fallback:
       replicas: ${lazy(deployment.status.replicas, 0)}
 ```
 
-A common pattern is `lazy(dep.ready(), false)` — gate on readiness with a false default. `.ready()`
-returns true when a node is applied and its readyWhen conditions pass. When the dependency is absent,
-`lazy()` returns `false`, and the expression takes the fallback path. When the dependency later
-completes and becomes ready, the change triggers re-evaluation.
+`lazy(deployment.ready(), false)` returns `false` when `deployment` is absent. The ternary evaluates
+to `'PENDING'`. When `deployment` later completes and becomes ready, the change triggers
+re-evaluation.
 
-### Classification
-
-A dependency referenced outside any `lazy()` call — in any expression on the consumer — is hard. A
-dependency referenced only inside `lazy()` calls is lazy. A dependency that appears both inside and
-outside `lazy()` is hard (the non-lazy reference governs). Classification is determined at compile
-time.
-
-Both hard and lazy dependencies are edges in the same graph — cycles involving either type are
-rejected. The distinction affects two walk behaviors:
-
-| Behavior                   | Hard | Lazy |
-| -------------------------- | ---- | ---- |
-| Dispatch ordering          | Yes  | No   |
-| Negative state propagation | Yes  | No   |
-
-Everything else is identical. Both create edges for change-driven re-evaluation.
-
-A hard dependency gates dispatch — the consumer waits for the dependency to complete before
-evaluating. A lazy dependency does not gate — the consumer evaluates when its hard dependencies are
-satisfied. If the lazy dependency hasn't completed, its data is absent from the consumer's scope, and
-`lazy()` returns the declared default. When the lazy dependency later completes, the consumer is
-re-evaluated.
-
-Negative state propagation flows only through hard dependencies. If a hard dependency is Excluded,
-the consumer cannot evaluate and is also Excluded. If a hard dependency is in an error state (Error,
-Conflict, SystemError), the consumer is Blocked. A lazy dependency in any negative state does not
-affect the consumer — the `lazy()` fallback handles the absent case.
+A dependency referenced outside any `lazy()` call is hard — the consumer waits. A dependency
+referenced only inside `lazy()` calls is lazy — the consumer proceeds without it. A dependency that
+appears both inside and outside `lazy()` is hard.
 
 ## Nested Graphs
 
