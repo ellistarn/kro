@@ -457,8 +457,3 @@ removes that flexibility. readyWhen produces the signal, propagateWhen on the co
 references the parent collection, which includes sibling state. Concurrent evaluation against a
 static snapshot produces incorrect budget enforcement — all children see the same state and all
 dispatch. Sequential evaluation with aggregate updates after each dispatch is required.
-
-**Custom `lazy()` function for absent-data handling.** A custom non-strict CEL function that catches
-unknown values and returns a default. Works but duplicates CEL's optional types library, which
-already provides `?` (optional field select), `.orValue()` (default on absent), and short-circuiting
-semantics. Optional types are built into CEL and handle the same cases without custom functions.
