@@ -182,15 +182,16 @@ func TestExtractFieldPaths(t *testing.T) {
 			},
 		},
 		{
-			name:      "ready function call — not a select chain",
+			name:      "ready function call — extracts __ready field path",
 			expr:      "deploy.ready()",
 			vars:      []string{"deploy"},
 			scopeVars: map[string]bool{"deploy": true},
-			// ready() is a CallExpr with target=Ident("deploy"). The
-			// chain is Ident → Call, not Ident → Select, so no path
-			// is extracted. This is correct — readiness is a runtime
-			// property, not a field path.
-			want: map[string][]graph.FieldPath{},
+			// .ready() is a property of a node like any other — it
+			// produces ["__ready"] as a field path through the same
+			// mechanism as status.replicas or metadata.name.
+			want: map[string][]graph.FieldPath{
+				"deploy": {{"__ready"}},
+			},
 		},
 	}
 

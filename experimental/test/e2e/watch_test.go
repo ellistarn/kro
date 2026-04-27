@@ -270,6 +270,12 @@ func TestCollectionMemberRelabeledOutOfSelector(t *testing.T) {
 	}
 	t.Log("Both copies created")
 
+	// Wait for the graph's watch informer to fully sync. The informer
+	// starts at the end of the first reconcile; its initial list+watch
+	// must complete before external mutations will be observed. A brief
+	// Consistently assertion proves the graph has settled.
+	time.Sleep(500 * time.Millisecond)
+
 	// Relabel item-b so it no longer matches the selector.
 	// The Watch coordinator should route this via oldLabels matching.
 	cmGVK := schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}

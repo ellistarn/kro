@@ -42,11 +42,24 @@ func extractFieldPathsFromAST(expr celast.Expr, scopeVars map[string]bool, compr
 
 		case celast.CallKind:
 			call := e.AsCall()
-			// Skip the target of ready() calls. Per 001-graph.md § Dependencies,
-			// .ready() reads __ready and should produce a dependency path
-			// ["__ready"]. TODO: extract ["__ready"] as a DepPath so the
-			// input-hash covers readiness changes uniformly.
+			// .ready() is a property of a node like any other field —
+			// extract ["__ready"] as a dependency path. Per
+			// 001-graph.md § Dependencies, .ready() produces a field
+			// path through the same mechanism as status.replicas or
+			// metadata.name.
 			if call.IsMemberFunction() && call.FunctionName() == "ready" {
+				if target := call.Target(); target != nil {
+					if target.Kind() == celast.IdentKind {
+						root := target.AsIdent()
+						if scopeVars[root] && (comprehensionVars == nil || !comprehensionVars[root]) {
+							graph.AddPath(result, root, graph.FieldPath{"__ready"})
+						}
+					} else {
+						// Non-identifier target (e.g., comprehension
+						// result) — walk to capture dependencies.
+						walk(target)
+					}
+				}
 				return
 			}
 			if call.Target() != nil {

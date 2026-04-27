@@ -17,10 +17,8 @@ import (
 	"hash/fnv"
 	"time"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/kubernetes-sigs/kro/experimental/controller/compiler"
 	dagpkg "github.com/kubernetes-sigs/kro/experimental/controller/dag"
@@ -78,9 +76,10 @@ type walkState struct {
 	watcher *watches.GraphWatcher
 
 	// Trigger maps
-	triggered            map[string]bool
-	resyncTriggered       map[string]bool
-	propagationTriggered map[string]bool
+	triggered                map[string]bool
+	resyncTriggered          map[string]bool
+	propagationTriggered     map[string]bool
+	lazyPropagationTriggered map[string]bool
 
 	// Watch incremental cache — drained once at walk start.
 	// Per 005-reconciliation.md § Propagation.
@@ -147,7 +146,11 @@ type walkState struct {
 // against re-evaluation of already-committed nodes.
 func (w *walkState) notifyDependents(nodeID string) {
 	for _, depIdx := range w.dag.Dependents[nodeID] {
-		w.propagationTriggered[w.dag.Nodes[depIdx].ID] = true
+		depNode := &w.dag.Nodes[depIdx]
+		w.propagationTriggered[depNode.ID] = true
+		if depNode.Dependencies[nodeID] == graphpkg.DepLazy {
+			w.lazyPropagationTriggered[depNode.ID] = true
+		}
 		w.tryDispatch(depIdx)
 	}
 }
@@ -274,19 +277,15 @@ func (w *walkState) propagateIfChanged(node *graphpkg.Node, observed any, nodeSt
 	if err != nil || propagateHash == "" {
 		return false
 	}
-	// Include readiness state in the propagation hash so downstream nodes
-	// that reference .ready() are triggered when readiness changes, even
-	// if output field paths are unchanged.
-	if nodeState == dagpkg.NodeReady {
-		propagateHash += ":ready=true"
-	} else {
-		propagateHash += ":ready=false"
-	}
 	prevHash := w.state.previousSelfHashes[node.ID]
 	propagated := prevHash == "" || propagateHash != prevHash
 	if propagated {
 		for _, depIdx := range w.dag.Dependents[node.ID] {
-			w.propagationTriggered[w.dag.Nodes[depIdx].ID] = true
+			depNode := &w.dag.Nodes[depIdx]
+			w.propagationTriggered[depNode.ID] = true
+			if depNode.Dependencies[node.ID] == graphpkg.DepLazy {
+				w.lazyPropagationTriggered[depNode.ID] = true
+			}
 		}
 	}
 	log.FromContext(w.ctx).V(1).Info("propagation hash check",
@@ -301,7 +300,11 @@ func (w *walkState) propagateIfChanged(node *graphpkg.Node, observed any, nodeSt
 // is to assume output changed.
 func (w *walkState) unconditionalPropagate(node *graphpkg.Node) {
 	for _, depIdx := range w.dag.Dependents[node.ID] {
-		w.propagationTriggered[w.dag.Nodes[depIdx].ID] = true
+		depNode := &w.dag.Nodes[depIdx]
+		w.propagationTriggered[depNode.ID] = true
+		if depNode.Dependencies[node.ID] == graphpkg.DepLazy {
+			w.lazyPropagationTriggered[depNode.ID] = true
+		}
 	}
 }
 
@@ -494,14 +497,30 @@ func (w *walkState) run() {
 	// deps complete within the same walk, the worker sees stale .ready()
 	// values. Deposit explicit triggers so the next reconcile re-evaluates
 	// promptly (1s) rather than waiting for the default resync interval.
-	// The input-hash naturally differs on the next reconcile (__ready
-	// changed), so no hash invalidation is needed.
 	if len(w.staleLazyDeps) > 0 && w.watcher != nil {
 		for nodeID := range w.staleLazyDeps {
 			w.watcher.DepositTrigger(nodeID)
 		}
 		if w.requeueFloor == 0 || w.requeueFloor > time.Second {
 			w.requeueFloor = time.Second
+		}
+	}
+
+	// Late propagation: when a lazy dependency's output changes after
+	// the consumer was already processed in this walk, the propagation
+	// trigger fires but the consumer can't re-dispatch. Deposit
+	// explicit triggers and set a 1-second requeue floor so the next
+	// reconcile re-evaluates promptly. Only lazy propagation triggers
+	// are deposited — hard dep propagation doesn't need this because
+	// hard deps are guaranteed to complete before their consumers
+	// dispatch. Triggers that arrived AFTER the node was processed
+	// remain (they were cleared at the start of processing).
+	if w.watcher != nil {
+		for nodeID := range w.lazyPropagationTriggered {
+			w.watcher.DepositTrigger(nodeID)
+			if w.requeueFloor == 0 || w.requeueFloor > time.Second {
+				w.requeueFloor = time.Second
+			}
 		}
 	}
 
@@ -592,6 +611,13 @@ func (w *walkState) tryDispatch(idx int) {
 		w.skipNode(node)
 		return
 	}
+
+	// Consume propagation triggers — they're handled by this evaluation.
+	// Any trigger arriving AFTER this point (from a dep completing later
+	// in the walk) will remain set for post-walk deposit.
+	hadLazyPropagation := w.lazyPropagationTriggered[node.ID]
+	delete(w.propagationTriggered, node.ID)
+	delete(w.lazyPropagationTriggered, node.ID)
 
 	// Check hard dependencies. Lazy deps don't gate dispatch or cause
 	// exclusion — the expression has a branch that handles absent data.
@@ -709,8 +735,12 @@ func (w *walkState) tryDispatch(idx int) {
 	}
 
 	// Step 4: Evaluation check — section-scoped evaluation hashing.
+	// Propagation-triggered nodes bypass the hash check: a dependency's
+	// output changed, so re-evaluate. The hash optimization applies only
+	// to self-triggered nodes (watch events, resync) where the question
+	// is "did my inputs actually change?"
 	declaredNodeType := node.Type()
-	canHashSkip := declaredNodeType != graphpkg.NodeTypeRef && declaredNodeType != graphpkg.NodeTypeWatch && !w.resyncTriggered[node.ID]
+	canHashSkip := declaredNodeType != graphpkg.NodeTypeRef && declaredNodeType != graphpkg.NodeTypeWatch && !w.resyncTriggered[node.ID] && !hadLazyPropagation
 	if canHashSkip {
 		if _, hasPrevHash := w.state.previousEvalHashes[node.ID]; hasPrevHash {
 			evalHash, hashErr := hashNodeInputs(node, w.eval.scope)
@@ -740,10 +770,11 @@ func (w *walkState) tryDispatch(idx int) {
 						if prevRV != "" && prevAPIVersion != "" && prevKind != "" {
 							gv, _ := schema.ParseGroupVersion(prevAPIVersion)
 							gvr := gvkToGVR(gv.WithKind(prevKind))
-							liveRV := w.watcher.GetResourceVersion(gvr, prevNS, prevName)
-							if liveRV != "" && liveRV != prevRV {
-								selfChanged = true
-							}
+						liveRV := w.watcher.GetResourceVersion(gvr, prevNS, prevName)
+						// Covers both mutations (RV changed) and deletions (RV went from non-empty to "").
+						if liveRV != prevRV {
+							selfChanged = true
+						}
 						}
 					}
 				}
@@ -760,81 +791,12 @@ func (w *walkState) tryDispatch(idx int) {
 				return
 			}
 
-				// Path 2: watch-triggered or self-state changed — refresh scope.
-				//
-				// This is the primary fast path for watch-driven state changes.
-				// A watch event signals a resource change (e.g., external
-				// controller updated status) but the node's template inputs
-				// haven't changed (eval hash match). Re-read live state,
-				// re-evaluate readyWhen, propagate only if output changed.
-				//
-				// Known liveness bound: the APIReader.Get below runs in the
-				// single-threaded coordinator, serializing API server round
-				// trips at O(N × RTT). If profiling shows this is a
-				// bottleneck, move the GET to a lightweight worker goroutine.
-				logger.V(1).Info("watch refresh — re-reading live state",
-					"node", node.ID)
-				SelfRefreshTotal.With(graphMetricLabels(
-					w.graph.GetName(), w.graph.GetNamespace(), node.ID,
-				)).Inc()
-				if prevMap, ok := prevScope.(map[string]any); ok {
-					prevMD, _ := prevMap["metadata"].(map[string]any)
-					prevAPIVersion, _ := prevMap["apiVersion"].(string)
-					prevKind, _ := prevMap["kind"].(string)
-					prevNS, _ := prevMD["namespace"].(string)
-					prevName, _ := prevMD["name"].(string)
-					gv, _ := schema.ParseGroupVersion(prevAPIVersion)
-					gvk := gv.WithKind(prevKind)
-					readBack := &unstructured.Unstructured{}
-					readBack.SetGroupVersionKind(gvk)
-					// Direct API server read — bypasses the controller-runtime
-					// cache, which can lag behind the metadata informer and
-					// serve stale data.
-					if err := w.r.apiReader().Get(w.ctx, types.NamespacedName{Namespace: prevNS, Name: prevName}, readBack); err == nil {
-						w.eval.scope[node.ID] = readBack.Object
-					} else if apierrors.IsNotFound(err) {
-						// Resource was deleted externally. Path 2 can't
-						// refresh — fall through to Path 3 (full evaluation)
-						// which will re-create the resource via SSA apply.
-						logger.V(1).Info("resource deleted externally — falling through to full evaluation",
-							"node", node.ID)
-						delete(w.state.previousEvalHashes, node.ID)
-						goto fullEval
-					} else {
-						w.eval.scope[node.ID] = prevScope
-					}
-				} else if prevScope != nil {
-					w.eval.scope[node.ID] = prevScope
-				}
-				w.carryForwardKeys(node.ID)
-				if w.watcher != nil {
-					w.watcher.RetainWatches(node.ID)
-				}
-				nodeState := dagpkg.NodeReady
-				if err := w.eval.evalReadiness(node.ID, node.ReadyWhen); err != nil {
-					nodeState = dagpkg.NodeNotReady
-				}
-				w.plan.States[node.ID] = nodeState
-				w.state.previousPlanStates[node.ID] = nodeState
-				w.state.previousScope[node.ID] = w.eval.scope[node.ID]
-				if evalHash, err := hashNodeInputs(node, w.eval.scope); err == nil && evalHash != "" {
-					w.state.previousEvalHashes[node.ID] = evalHash
-				}
-				// Propagation check: hash the output fields dependents
-				// reference and compare with the previous reconcile. Only
-				// mark dependents as propagation-triggered if the hash
-				// actually changed. This mirrors Step 8 in the coordinator
-				// loop — without it, every watch event cascades through
-				// the entire downstream subgraph.
-				if observed := w.eval.scope[node.ID]; observed != nil {
-					if !w.propagateIfChanged(node, observed, nodeState) {
-						w.unconditionalPropagate(node)
-					}
-				}
-			for _, depIdx := range w.dag.Dependents[node.ID] {
-				w.tryDispatch(depIdx)
-			}
-			return
+			// Path 2: self-state changed (liveRV differs or resource
+			// deleted) — fall through to full evaluation. SSA apply is
+			// idempotent and corrects drift from desired state (external
+			// modification, deletion, status updates).
+			delete(w.state.previousEvalHashes, node.ID)
+			goto fullEval
 			}
 		fullEval:
 			// Path 3: hash mismatch → full evaluation.

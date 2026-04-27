@@ -150,8 +150,20 @@ func ExtractReferencedPathsFromNode(node Node, exprPaths map[string]map[string][
 				}
 				continue
 			}
-			// Upstream dependency reference
-			dependencies[scopeVar] = DepHard
+			// Upstream dependency reference. When the only field paths
+			// are ["__ready"], the dependency classification comes from
+			// checkReadyRef (DepLazy for .ready() in branch expressions).
+			// Only set DepHard when non-ready paths are present.
+			allReadyOnly := true
+			for _, fp := range fieldPaths {
+				if len(fp) != 1 || fp[0] != "__ready" {
+					allReadyOnly = false
+					break
+				}
+			}
+			if !allReadyOnly {
+				dependencies[scopeVar] = DepHard
+			}
 			for _, fp := range fieldPaths {
 				AddPath(depPaths, scopeVar, fp)
 			}
@@ -164,11 +176,11 @@ func ExtractReferencedPathsFromNode(node Node, exprPaths map[string]map[string][
 	// expression can produce a result without the target's data. The
 	// lazy dependency ensures the consumer is in the target's Dependents
 	// for propagation triggering, without gating dispatch or causing
-	// contagious exclusion.
+	// negative state propagation.
 	//
-	// The field path walker already skips .ready() targets (fieldpath.go:47),
-	// so no DepPaths are created — the dependency is for ordering and
-	// propagation, not field-path hashing.
+	// The field path walker extracts ["__ready"] for .ready() targets,
+	// and processExpr skips DepHard for __ready-only paths — so this
+	// function's DepLazy classification takes effect.
 	checkReadyRef := func(expr string) {
 		remaining := expr
 		for {

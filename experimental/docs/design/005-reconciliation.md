@@ -44,7 +44,7 @@ evaluation, readyWhen, propagateWhen, and includeWhen — if it's not in scope, 
 see it. Workers receive read-only views of the scope containing their dependencies' outputs. Hard
 dependencies are always present (the node waited for them). Lazy dependencies are included when
 available — if the lazy dependency completed before the consumer was dispatched, its data is in the
-snapshot. Otherwise, the entry is absent and the expression takes the branch that doesn't need it.
+scope view. Otherwise, the entry is absent and the expression takes the branch that doesn't need it.
 
 ### Node States
 

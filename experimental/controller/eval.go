@@ -505,9 +505,12 @@ func (e *evaluator) snapshotFor(node *graph.Node, state *instanceState) *evaluat
 	// Include lazy dep data. Lazy deps didn't gate dispatch — the
 	// expression has a branch that handles absent data. If the
 	// coordinator has their data (they completed before this node was
-	// dispatched), include real values. Otherwise, provide empty-map
-	// fallbacks so .ready() returns false and field-path access returns
-	// data-pending instead of a CEL "no such attribute" error.
+	// dispatched), include real values. If not in the current scope but
+	// available from the previous reconcile, use that — it's the best
+	// available data until the dep is re-evaluated in this walk.
+	// Otherwise, provide empty-map fallbacks so .ready() returns false
+	// and field-path access returns data-pending instead of a CEL
+	// "no such attribute" error.
 	for depID, kind := range node.Dependencies {
 		if kind == graph.DepLazy {
 			if _, exists := snap[depID]; exists {
@@ -515,6 +518,12 @@ func (e *evaluator) snapshotFor(node *graph.Node, state *instanceState) *evaluat
 			}
 			if v, ok := e.scope[depID]; ok {
 				snap[depID] = v
+			} else if state != nil {
+				if prev, ok := state.previousScope[depID]; ok {
+					snap[depID] = prev
+				} else {
+					snap[depID] = map[string]any{}
+				}
 			} else {
 				snap[depID] = map[string]any{}
 			}
