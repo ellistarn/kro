@@ -462,10 +462,3 @@ dispatch. Sequential evaluation with aggregate updates after each dispatch is re
 unknown values and returns a default. Works but duplicates CEL's optional types library, which
 already provides `?` (optional field select), `.orValue()` (default on absent), and short-circuiting
 semantics. Optional types are built into CEL and handle the same cases without custom functions.
-
-**Implicit lazy classification via partial evaluation.** Evaluate every expression with each
-dependency marked unknown; if the result is concrete, classify as lazy automatically. Removes the
-need for authors to use optional syntax. But it hides a behavioral change — the author doesn't see
-that a dependency is lazy, and the graph's dispatch ordering changes silently based on expression
-structure. Optional types make the behavioral contract visible — `.orValue()` in the expression
-signals that the author expects the dependency might be absent.
