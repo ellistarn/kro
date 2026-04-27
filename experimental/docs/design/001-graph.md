@@ -364,17 +364,14 @@ data natively — `?` for field access, `.orValue()` for defaults:
       replicas: ${deployment.?status.?availableReplicas.orValue(0)}
 ```
 
-`appStatus` evaluates immediately. While `deployment` is absent, `deployment.ready()` returns
-`optional.none()` and `.orValue(false)` provides the default — the condition reports `Unknown`. When
-`deployment` completes and becomes ready, the consumer re-evaluates and the condition flips to
-`True`. Field access uses `?` to chain through the optional —
-`deployment.?status.?availableReplicas.orValue(0)` returns `0` when deployment is absent and the
-actual replica count when present.
+`appStatus` evaluates immediately. While `deployment` is absent, `.orValue()` returns the default —
+the condition reports `Unknown`. When `deployment` completes and becomes ready, the consumer
+re-evaluates and the condition flips to `True`.
 
 A lazy dependency does not make the consumer wait — it evaluates when its hard dependencies are
 satisfied, regardless of whether lazy dependencies are present. If a lazy dependency is in a negative
-state, the consumer is unaffected — the optional is empty and `.orValue()` returns the default. When
-a lazy dependency later completes, the consumer re-evaluates.
+state, the consumer is unaffected — `.orValue()` returns the default. When a lazy dependency later
+completes, the consumer re-evaluates.
 
 ## Nested Graphs
 
