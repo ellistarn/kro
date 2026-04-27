@@ -46,13 +46,13 @@ func testAccessModeEnv(t *testing.T, vars ...string) *cel.Env {
 		cel.Function("ready",
 			cel.MemberOverload("dyn_ready",
 				[]*cel.Type{cel.DynType},
-				cel.BoolType,
+				cel.DynType,
 			),
 		),
 		cel.Function("updated",
 			cel.MemberOverload("dyn_updated",
 				[]*cel.Type{cel.DynType},
-				cel.BoolType,
+				cel.DynType,
 			),
 		),
 	}
@@ -286,32 +286,32 @@ func TestClassifyAccessModes(t *testing.T) {
 			want:      map[string]bool{"deploy": true}, // true = optional (lazy)
 		},
 		{
-			name:      ".ready() — lazy (absorbs optionality)",
+			name:      ".ready() — hard (no .orValue())",
 			expr:      "deploy.ready()",
 			vars:      []string{"deploy"},
 			scopeVars: map[string]bool{"deploy": true},
-			want:      map[string]bool{"deploy": true},
+			want:      map[string]bool{"deploy": false},
 		},
 		{
-			name:      ".updated() — lazy",
+			name:      ".updated() — hard (no .orValue())",
 			expr:      "deploy.updated()",
 			vars:      []string{"deploy"},
 			scopeVars: map[string]bool{"deploy": true},
-			want:      map[string]bool{"deploy": true},
+			want:      map[string]bool{"deploy": false},
 		},
 		{
-			name:      "direct + .ready() on same var — hard wins",
+			name:      "direct + .ready() on same var — both hard",
 			expr:      "deploy.ready() ? deploy.status.replicas : 0",
 			vars:      []string{"deploy"},
 			scopeVars: map[string]bool{"deploy": true},
-			want:      map[string]bool{"deploy": false}, // direct access wins
+			want:      map[string]bool{"deploy": false}, // both are direct access
 		},
 		{
-			name:      "two vars — one optional one direct",
+			name:      "two vars — both direct",
 			expr:      "deploy.ready() && svc.status.ready",
 			vars:      []string{"deploy", "svc"},
 			scopeVars: map[string]bool{"deploy": true, "svc": true},
-			want:      map[string]bool{"deploy": true, "svc": false},
+			want:      map[string]bool{"deploy": false, "svc": false},
 		},
 		{
 			name:      "bare identifier — direct",
@@ -349,11 +349,32 @@ func TestClassifyAccessModes(t *testing.T) {
 			want:      map[string]bool{},
 		},
 		{
-			name:      ".ready() in && chain — both lazy",
+			name:      ".ready() in && chain — both hard (no .orValue())",
 			expr:      "a.ready() && b.ready()",
 			vars:      []string{"a", "b"},
 			scopeVars: map[string]bool{"a": true, "b": true},
-			want:      map[string]bool{"a": true, "b": true},
+			want:      map[string]bool{"a": false, "b": false},
+		},
+		{
+			name:      ".ready().orValue() — lazy",
+			expr:      "deploy.ready().orValue(false)",
+			vars:      []string{"deploy"},
+			scopeVars: map[string]bool{"deploy": true},
+			want:      map[string]bool{"deploy": true},
+		},
+		{
+			name:      ".updated().orValue() — lazy",
+			expr:      "deploy.updated().orValue(false)",
+			vars:      []string{"deploy"},
+			scopeVars: map[string]bool{"deploy": true},
+			want:      map[string]bool{"deploy": true},
+		},
+		{
+			name:      ".ready().orValue() and .ready() on different vars",
+			expr:      "a.ready().orValue(false) && b.ready()",
+			vars:      []string{"a", "b"},
+			scopeVars: map[string]bool{"a": true, "b": true},
+			want:      map[string]bool{"a": true, "b": false},
 		},
 	}
 

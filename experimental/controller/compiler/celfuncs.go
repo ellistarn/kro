@@ -88,17 +88,16 @@ func celReadyFunction() []cel.EnvOption {
 	}
 	impl := func(val ref.Val) ref.Val {
 		// Handle optional receiver: when a lazy dependency is
-		// optional.none() (absent), .ready() returns concrete false.
-		// When present, .ready() unwraps and checks the inner value.
-		// .ready() absorbs optionality — it always returns a concrete
-		// bool, never optional(bool). This lets expressions like
-		// `a.ready() && b.ready() ? 'ACTIVE' : 'IN_PROGRESS'` work
-		// regardless of whether the deps are hard or lazy.
+		// optional.none() (absent), .ready() returns optional.none().
+		// When present, .ready() unwraps and returns optional.of(bool).
+		// The user chains .orValue(false) to unwrap — this explicit
+		// handling is what makes the dep lazy. Without .orValue(),
+		// .ready() on a hard dep returns concrete bool directly.
 		if opt, ok := val.(*types.Optional); ok {
 			if !opt.HasValue() {
-				return types.Bool(false) // absent dep → not ready
+				return types.OptionalNone // absent dep → optional.none()
 			}
-			return readyConcreteImpl(opt.GetValue())
+			return types.OptionalOf(readyConcreteImpl(opt.GetValue()))
 		}
 		return readyConcreteImpl(val)
 	}
@@ -106,7 +105,7 @@ func celReadyFunction() []cel.EnvOption {
 		cel.Function("ready",
 			cel.MemberOverload("dyn_ready",
 				[]*cel.Type{cel.DynType},
-				cel.BoolType,
+				cel.DynType, // DynType: returns bool on concrete, optional(bool) on optional
 				cel.UnaryBinding(impl),
 			),
 		),
@@ -305,13 +304,13 @@ func celUpdatedFunction() []cel.EnvOption {
 		}
 	}
 	impl := func(val ref.Val) ref.Val {
-		// Handle optional receiver: absorb optionality, return concrete bool.
-		// Absent dep → not updated (false). Same rationale as .ready().
+		// Handle optional receiver: same pattern as .ready().
+		// Returns optional.none() for absent, optional.of(bool) for present.
 		if opt, ok := val.(*types.Optional); ok {
 			if !opt.HasValue() {
-				return types.Bool(false) // absent dep → not updated
+				return types.OptionalNone
 			}
-			return updatedConcreteImpl(opt.GetValue())
+			return types.OptionalOf(updatedConcreteImpl(opt.GetValue()))
 		}
 		return updatedConcreteImpl(val)
 	}
@@ -319,7 +318,7 @@ func celUpdatedFunction() []cel.EnvOption {
 		cel.Function("updated",
 			cel.MemberOverload("dyn_updated",
 				[]*cel.Type{cel.DynType},
-				cel.BoolType,
+				cel.DynType, // DynType: returns bool on concrete, optional(bool) on optional
 				cel.UnaryBinding(impl),
 			),
 		),

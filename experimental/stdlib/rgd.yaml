@@ -225,11 +225,11 @@ spec:
                           "finalizers": ["experimental.kro.run/graph"]
                         },
                         "status": {
-                          "state": "${" + (schema.spec.resources.size() == 0 ? "true" : schema.spec.resources.map(r, r.id + ".ready()").join(" && ")) + " ? 'ACTIVE' : 'IN_PROGRESS'}",
+                          "state": "${" + (schema.spec.resources.size() == 0 ? "true" : schema.spec.resources.map(r, r.id + ".ready().orValue(false)").join(" && ")) + " ? 'ACTIVE' : 'IN_PROGRESS'}",
                           "conditions": [
                             {
                               "type": "Ready",
-                              "status": "${" + (schema.spec.resources.size() == 0 ? "true" : schema.spec.resources.map(r, r.id + ".ready()").join(" && ")) + " ? 'True' : 'False'}",
+                              "status": "${" + (schema.spec.resources.size() == 0 ? "true" : schema.spec.resources.map(r, r.id + ".ready().orValue(false)").join(" && ")) + " ? 'True' : 'False'}",
                               "reason": "Ready",
                               "observedGeneration": instance.metadata.generation,
                               "lastTransitionTime": instance.metadata.creationTimestamp
@@ -247,12 +247,12 @@ spec:
                 metadata:
                   name: $${schema.metadata.name}
                 status:
-                  state: '$${validation.result.valid && crd.ready() ? "Active" : "Inactive"}'
+                  state: '$${validation.result.valid && crd.ready().orValue(false) ? "Active" : "Inactive"}'
                   topologicalOrder: '$${validation.result.valid ? schema.?spec.?resources.orValue([]).map(r, r.id) : []}'
                   conditions:
                     - type: Ready
-                      status: '$${validation.result.valid && crd.ready() ? "True" : "False"}'
-                      reason: '$${validation.result.valid && crd.ready() ? "Ready" : "Invalid"}'
+                      status: '$${validation.result.valid && crd.ready().orValue(false) ? "True" : "False"}'
+                      reason: '$${validation.result.valid && crd.ready().orValue(false) ? "Ready" : "Invalid"}'
                       message: '$${validation.result.valid ? "" : validation.result.message}'
                       observedGeneration: $${schema.metadata.generation}
                       lastTransitionTime: $${schema.metadata.creationTimestamp}
@@ -263,8 +263,8 @@ spec:
                       observedGeneration: $${schema.metadata.generation}
                       lastTransitionTime: $${schema.metadata.creationTimestamp}
                     - type: KindReady
-                      status: '$${validation.result.valid && crd.ready() ? "True" : "False"}'
-                      reason: '$${validation.result.valid && crd.ready() ? "Ready" : "Invalid"}'
+                      status: '$${validation.result.valid && crd.ready().orValue(false) ? "True" : "False"}'
+                      reason: '$${validation.result.valid && crd.ready().orValue(false) ? "Ready" : "Invalid"}'
                       message: '$${validation.result.valid ? "" : validation.result.message}'
                       observedGeneration: $${schema.metadata.generation}
                       lastTransitionTime: $${schema.metadata.creationTimestamp}

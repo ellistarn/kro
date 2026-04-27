@@ -224,9 +224,11 @@ func resolveOptionalSelectChain(e celast.Expr, comprehensionVars map[string]bool
 // Optional access patterns:
 //   - _?._ (OptSelect) with scope var as first arg
 //   - _[?_] (OptIndex) with scope var as first arg
-//   - .ready() / .updated() member calls with scope var as target
+//   - .ready().orValue() / .updated().orValue() — explicit optional unwrap
 //
-// Direct access: regular Select, bare Ident, or any other use.
+// Direct access: regular Select, bare Ident, bare .ready()/.updated(), or
+// any other use. Bare .ready() (without .orValue()) is direct — the user
+// is not handling absence, so the dep must be present.
 // This classification drives DepKind: optional-only across ALL expressions → DepLazy.
 func classifyAccessModes(expr celast.Expr, scopeVars map[string]bool, comprehensionVars map[string]bool) map[string]bool {
 	result := map[string]bool{}
@@ -294,26 +296,36 @@ func classifyAccessModes(expr celast.Expr, scopeVars map[string]bool, comprehens
 				return
 			}
 
-			// .ready() / .updated() member calls with scope var as target.
-			// These methods absorb optionality: on an absent (optional.none)
-			// receiver they return concrete bool(false). The expression can
-			// always produce a result, so the access is optional.
-			if call.IsMemberFunction() &&
-				(call.FunctionName() == "ready" || call.FunctionName() == "updated") {
-				if target := call.Target(); target != nil {
-					if target.Kind() == celast.IdentKind {
-						root := target.AsIdent()
-						if scopeVars[root] && (comprehensionVars == nil || !comprehensionVars[root]) {
-							markAccess(root, true) // optional access
-							return
+			// .orValue() wrapping .ready()/.updated() → optional access.
+			// Pattern: deployment.ready().orValue(false) — the user
+			// explicitly handles absence. Bare .ready() without .orValue()
+			// falls through to the generic handler, which recurses into
+			// the target ident and marks DIRECT.
+			if call.IsMemberFunction() && call.FunctionName() == "orValue" {
+				if target := call.Target(); target != nil && target.Kind() == celast.CallKind {
+					inner := target.AsCall()
+					if inner.IsMemberFunction() &&
+						(inner.FunctionName() == "ready" || inner.FunctionName() == "updated") {
+						if innerTarget := inner.Target(); innerTarget != nil &&
+							innerTarget.Kind() == celast.IdentKind {
+							root := innerTarget.AsIdent()
+							if scopeVars[root] && (comprehensionVars == nil || !comprehensionVars[root]) {
+								markAccess(root, true) // optional: .ready().orValue()
+								for _, arg := range call.Args() {
+									walk(arg) // walk the default value for any refs
+								}
+								return
+							}
 						}
 					}
-					walk(target)
-					return
 				}
+				// Not the .ready()/.updated().orValue() pattern — fall through.
 			}
 
 			// Generic call — recurse into target and all args.
+			// Bare .ready()/.updated() without .orValue() fall here: the
+			// walk recurses into the target, reaches IdentKind, and marks
+			// DIRECT — making the dep hard.
 			if call.Target() != nil {
 				walk(call.Target())
 			}

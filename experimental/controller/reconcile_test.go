@@ -1933,8 +1933,8 @@ func TestLazyDepDoesNotGateDispatch(t *testing.T) {
 				"apiVersion": "v1", "kind": "ConfigMap",
 				"metadata": map[string]any{"name": "c"},
 				"data": map[string]any{
-					"a_ref":   "${a.metadata.name}",          // hard dep on A (direct field access)
-					"b_ready": "${b.ready() ? 'yes' : 'no'}", // lazy dep on B (.ready() only)
+					"a_ref":   "${a.metadata.name}",                         // hard dep on A (direct field access)
+					"b_ready": "${b.ready().orValue(false) ? 'yes' : 'no'}", // lazy dep on B (.ready().orValue() only)
 				},
 			}},
 		},
@@ -1994,9 +1994,9 @@ func TestLazyDepClassification_MixedAccess(t *testing.T) {
 				"apiVersion": "apps/v1", "kind": "Deployment",
 				"metadata": map[string]any{"name": "deploy"},
 			}},
-			// Consumer A: accesses deploy only via .ready() → DepLazy
+			// Consumer A: accesses deploy only via .ready().orValue() → DepLazy
 			{ID: "status", Def: map[string]any{
-				"state": "${deploy.ready() ? 'ACTIVE' : 'PENDING'}",
+				"state": "${deploy.ready().orValue(false) ? 'ACTIVE' : 'PENDING'}",
 			}},
 			// Consumer B: accesses deploy directly → DepHard
 			{ID: "service", Template: map[string]any{
@@ -2013,7 +2013,7 @@ func TestLazyDepClassification_MixedAccess(t *testing.T) {
 	serviceIdx := dag.Index["service"]
 
 	assert.Equal(t, graphpkg.DepLazy, dag.Nodes[statusIdx].Dependencies["deploy"],
-		"status accesses deploy only via .ready() → DepLazy")
+		"status accesses deploy only via .ready().orValue() → DepLazy")
 	assert.Equal(t, graphpkg.DepHard, dag.Nodes[serviceIdx].Dependencies["deploy"],
 		"service accesses deploy directly → DepHard")
 }
@@ -2032,7 +2032,7 @@ func TestLazyDepOptionalScope_AbsentReturnsDefault(t *testing.T) {
 			}},
 			{ID: "status", Def: map[string]any{
 				"replicas": "${deploy.?status.?availableReplicas.orValue(0)}",
-				"ready":    "${deploy.ready() ? 'yes' : 'no'}",
+				"ready":    "${deploy.ready().orValue(false) ? 'yes' : 'no'}",
 			}},
 		},
 	}
@@ -2053,10 +2053,10 @@ func TestLazyDepOptionalScope_AbsentReturnsDefault(t *testing.T) {
 
 	worker := eval.snapshotFor(statusNode, state)
 
-	// .ready() on absent lazy dep → false
-	readyVal, err := compiled.Eval("deploy.ready() ? 'yes' : 'no'", worker.scope)
+	// .ready().orValue(false) on absent lazy dep → false
+	readyVal, err := compiled.Eval("deploy.ready().orValue(false) ? 'yes' : 'no'", worker.scope)
 	require.NoError(t, err)
-	assert.Equal(t, "no", readyVal, ".ready() on absent lazy dep should return false")
+	assert.Equal(t, "no", readyVal, ".ready().orValue(false) on absent lazy dep should return false")
 
 	// ?.field.orValue() on absent lazy dep → default value
 	replicasVal, err := compiled.Eval("deploy.?status.?availableReplicas.orValue(0)", worker.scope)
@@ -2076,7 +2076,7 @@ func TestLazyDepOptionalScope_PresentReturnsRealData(t *testing.T) {
 			}},
 			{ID: "status", Def: map[string]any{
 				"replicas": "${deploy.?status.?availableReplicas.orValue(0)}",
-				"ready":    "${deploy.ready() ? 'yes' : 'no'}",
+				"ready":    "${deploy.ready().orValue(false) ? 'yes' : 'no'}",
 			}},
 		},
 	}
@@ -2101,10 +2101,10 @@ func TestLazyDepOptionalScope_PresentReturnsRealData(t *testing.T) {
 
 	worker := eval.snapshotFor(statusNode, state)
 
-	// .ready() on present lazy dep → true (deploy has __ready: true)
-	readyVal, err := compiled.Eval("deploy.ready() ? 'yes' : 'no'", worker.scope)
+	// .ready().orValue(false) on present lazy dep → true (deploy has __ready: true)
+	readyVal, err := compiled.Eval("deploy.ready().orValue(false) ? 'yes' : 'no'", worker.scope)
 	require.NoError(t, err)
-	assert.Equal(t, "yes", readyVal, ".ready() on present lazy dep should return true")
+	assert.Equal(t, "yes", readyVal, ".ready().orValue(false) on present lazy dep should return true")
 
 	// ?.field.orValue() on present lazy dep → real value
 	replicasVal, err := compiled.Eval("deploy.?status.?availableReplicas.orValue(0)", worker.scope)
