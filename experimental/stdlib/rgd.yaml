@@ -33,7 +33,7 @@ spec:
               storage: true
               schema:
                 openAPIV3Schema: >-
-                  ${simpleSchema.toOpenAPI({"types": {"ExternalRefMetadata": {"name": "string", "namespace": "string", "selector": "object"}, "ExternalRef": {"apiVersion": "string", "kind": "string", "metadata": "ExternalRefMetadata"}, "Resource": {"id": "string | required=true", "template": "any", "patch": "any", "ref": "any", "watch": "any", "def": "any", "externalRef": "ExternalRef", "readyWhen": "[]string", "includeWhen": "[]string", "propagateWhen": "[]string", "forEach": "[]map[string]string"}, "PrinterColumn": {"name": "string | required=true", "type": "string | required=true", "jsonPath": "string | required=true", "description": "string", "format": "string", "priority": "integer"}, "CRDMetadata": {"labels": "map[string]string", "annotations": "map[string]string"}}, "spec": {"schema": {"kind": "string | required=true pattern=\"^[A-Z][a-zA-Z0-9]{0,62}$\"", "apiVersion": "string", "group": "string | default=kro.run", "scope": "string | default=Namespaced", "spec": "object", "status": "object", "metadata": "CRDMetadata", "additionalPrinterColumns": "[]PrinterColumn"}, "resources": "[]Resource"}, "status": {"state": "string", "topologicalOrder": "[]string"}}, [])}
+                  ${simpleSchema.toOpenAPI({"types": {"ExternalRefMetadata": {"name": "string", "namespace": "string", "selector": "object"}, "ExternalRef": {"apiVersion": "string", "kind": "string", "metadata": "ExternalRefMetadata"}, "Resource": {"id": "string | required=true", "template": "any", "patch": "any", "ref": "any", "watch": "any", "def": "any", "externalRef": "ExternalRef", "readyWhen": "[]string", "includeWhen": "[]string", "propagateWhen": "[]string", "forEach": "[]map[string]string"}, "PrinterColumn": {"name": "string | required=true", "type": "string | required=true", "jsonPath": "string | required=true", "description": "string", "format": "string", "priority": "integer"}, "CRDMetadata": {"labels": "map[string]string", "annotations": "map[string]string"}}, "spec": {"schema": {"kind": "string | required=true pattern=\"^[A-Z][a-zA-Z0-9]{0,62}$\"", "apiVersion": "string", "group": "string | default=kro.run", "scope": "string | default=Namespaced", "spec": "object", "types": "object", "status": "object", "metadata": "CRDMetadata", "additionalPrinterColumns": "[]PrinterColumn"}, "resources": "[]Resource"}, "status": {"state": "string", "topologicalOrder": "[]string"}}, [])}
               subresources:
                 status: {}
               additionalPrinterColumns:
@@ -200,7 +200,7 @@ spec:
                             : {}
                         )})
                       + schema.spec.resources.filter(r, !has(r.externalRef)).map(r, r.merge({
-                        "propagateWhen": has(r.propagateWhen) ? r.propagateWhen : ["${" + r.id + ".dependencies().all(d, d.ready())}"],
+                        "propagateWhen": r.?propagateWhen.orValue(r.?forEach.orValue([]).size() > 0 ? [] : ["${" + r.id + ".dependencies().all(d, d.ready())}"]),
                         "forceApply": true,
                         "template": r.template.merge({
                           "metadata": (has(r.template.metadata) ? r.template.metadata : {}).merge({
@@ -250,7 +250,6 @@ spec:
                   name: $${schema.metadata.name}
                 status:
                   state: '$${validation.result.valid && crd.ready().orValue(false) ? "Active" : "Inactive"}'
-                  topologicalOrder: '$${validation.result.valid ? schema.?spec.?resources.orValue([]).map(r, r.id) : []}'
                   conditions:
                     - type: Ready
                       status: '$${validation.result.valid && crd.ready().orValue(false) ? "True" : "False"}'
@@ -280,8 +279,9 @@ spec:
     # compilationStatus mirrors the sub-Graph's Compiled condition to the RGD.
     # When compilation fails, this node also claims Ready and state (with
     # Inactive / False) because the sub-Graph is inert and rgdStatus can't
-    # fire. When compilation succeeds, the patch includes only Compiled —
-    # SSA relinquishes Ready and state for rgdStatus to claim.
+    # fire. When compilation succeeds, the patch includes only Compiled and
+    # topologicalOrder — SSA relinquishes Ready and state for rgdStatus to
+    # claim.
     - id: compilationStatus
       forEach:
         - graph: ${rgds}
@@ -317,6 +317,7 @@ spec:
               "kind": "ResourceGraphDefinition",
               "metadata": {"name": graph.metadata.labels["kro.run/instance-name"]},
               "status": {
+                "topologicalOrder": graph.?status.?topologicalOrder.orValue({}).?instances.orValue([]).filter(id, id != "schema" && id != "rgdInstanceStatus"),
                 "conditions": [
                   {
                     "type": "Compiled",

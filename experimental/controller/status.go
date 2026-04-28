@@ -53,6 +53,15 @@ type reconcileState struct {
 	// Finalization: "FinalizerSkipped is not an error — finalization was
 	// bypassed because there was nothing to finalize."
 	nodeNotes []string
+
+	// topologicalOrder is written to Graph CR status. It has the structure:
+	//   {"nodes": ["a", "b", ...], "forEachNodeID": ["child1", "child2", ...]}
+	// "nodes" is the parent DAG's own topological order. Each forEach node
+	// that has a pre-compiled child Graph gets a sibling key mapping to
+	// the child's resource topology (internal nodes like ref/patch filtered
+	// out). Consumers read the child key directly — e.g., rgd.yaml reads
+	// graph.status.topologicalOrder.instances for the resource order.
+	topologicalOrder map[string]any
 }
 
 // deriveCompiledCondition computes the Compiled condition.
@@ -182,11 +191,18 @@ func (r *GraphReconciler) updateStatus(ctx context.Context, graph *unstructured.
 	preserveTransitionTime(existingConditions, compiledCondition, compiledStatus)
 	preserveTransitionTime(existingConditions, readyCondition, readyStatus)
 
+	// Ensure topologicalOrder is non-nil to avoid JSON null.
+	topoOrder := state.topologicalOrder
+	if topoOrder == nil {
+		topoOrder = map[string]any{"nodes": []string{}}
+	}
+
 	status := map[string]any{
 		"conditions": []any{
 			compiledCondition,
 			readyCondition,
 		},
+		"topologicalOrder": topoOrder,
 	}
 
 	// Skip the status write if nothing changed. Compare via JSON to avoid

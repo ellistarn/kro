@@ -117,7 +117,7 @@ func newTestWalkState(t *testing.T, dag *dagpkg.DAG) *walkState {
 		dag:                  dag,
 		plan:                 plan,
 		state:                newInstanceState(compiled),
-		eval:                 &evaluator{compiled: compiled, scope: map[string]any{}},
+		eval:                 &evaluator{compiled: compiled, scope: map[string]any{}, nodeReady: map[string]bool{}},
 		triggered:            triggered,
 		propagationTriggered: map[string]bool{},
 		dispatched:           map[int]bool{},
