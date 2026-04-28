@@ -1,11 +1,12 @@
 // celfuncs.go defines the custom CEL extension functions registered into the
 // compilation environment: plural(), .ready(), simpleSchema.toOpenAPI(),
-// .updated(), and .dependencies(). These are pure function factories — they
-// produce cel.EnvOption values consumed by CompileGraphSpec and
+// .updated(), .dependencies(), and oci(). These are pure function factories —
+// they produce cel.EnvOption values consumed by CompileGraphSpec and
 // compileDeferredExpressions.
 package compiler
 
 import (
+	"encoding/base32"
 	"encoding/json"
 	"strings"
 
@@ -341,4 +342,51 @@ func celDependenciesFunction() []cel.EnvOption {
 			),
 		),
 	}
+}
+
+// ociEncoding is base32 (RFC 4648) lowercased without padding. The resulting
+// string contains only [a-z2-7] — always valid as a DNS label.
+var ociEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
+
+// celOCIFunction returns CEL env options for the oci() function.
+//
+// oci(string) → string: takes an OCI reference (e.g.
+// "123456789.dkr.ecr.us-west-2.amazonaws.com/graphs/networking:v1.0.0")
+// and returns a DNS-compliant Kubernetes resource name by base32-encoding
+// the input. The artifact server decodes the name back to the original URI.
+//
+// The function is pure — same input, same output. The encoded name is opaque;
+// users never read or type it.
+func celOCIFunction() []cel.EnvOption {
+	return []cel.EnvOption{
+		cel.Function("oci",
+			cel.Overload("oci_string",
+				[]*cel.Type{cel.StringType},
+				cel.StringType,
+				cel.UnaryBinding(func(val ref.Val) ref.Val {
+					uri := val.Value().(string)
+					if uri == "" {
+						return types.NewErr("oci(): URI must not be empty")
+					}
+					return types.String(EncodeOCIName(uri))
+				}),
+			),
+		),
+	}
+}
+
+// EncodeOCIName base32-encodes an OCI URI into a DNS-compliant Kubernetes
+// resource name. The result contains only [a-z2-7].
+func EncodeOCIName(uri string) string {
+	return strings.ToLower(ociEncoding.EncodeToString([]byte(uri)))
+}
+
+// DecodeOCIName decodes a base32-encoded Kubernetes resource name back to
+// the original OCI URI. Returns an error if the name is not valid base32.
+func DecodeOCIName(name string) (string, error) {
+	b, err := ociEncoding.DecodeString(strings.ToUpper(name))
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
