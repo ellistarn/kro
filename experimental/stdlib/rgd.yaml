@@ -240,6 +240,8 @@ spec:
                     }
 
             - id: rgdStatus
+              propagateWhen:
+                - '$${!validation.result.valid || crd.ready().orValue(false)}'
               forceApply: true
               patch:
                 apiVersion: kro.run/v1alpha1
