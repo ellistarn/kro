@@ -342,6 +342,7 @@ func CompileGraphSpec(spec *graph.GraphSpec, typeInfo *TypeSource) (*CompiledGra
 		krocel.WithCustomDeclarations(celReadyFunction()),
 		krocel.WithCustomDeclarations(celUpdatedFunction()),
 		krocel.WithCustomDeclarations(celDependenciesFunction()),
+		krocel.WithCustomDeclarations(celOCIFunction()),
 		// __kroNodeReady carries per-Watch readyWhen verdicts, looked up
 		// by the AST rewrite of `<wk_id>.ready()` (see readyrewrite.go).
 		// Per 001-graph.md § readyWhen: "A Watch's `.ready()` returns
@@ -449,6 +450,7 @@ func CompileGraphSpec(spec *graph.GraphSpec, typeInfo *TypeSource) (*CompiledGra
 			krocel.WithCustomDeclarations(celReadyFunction()),
 			krocel.WithCustomDeclarations(celUpdatedFunction()),
 			krocel.WithCustomDeclarations(celDependenciesFunction()),
+			krocel.WithCustomDeclarations(celOCIFunction()),
 			krocel.WithCustomDeclarations([]cel.EnvOption{
 				cel.Variable(ReservedNodeReadyVar, cel.MapType(cel.StringType, cel.BoolType)),
 				cel.Variable(ReservedDepsMapVar, cel.MapType(cel.StringType, cel.ListType(cel.DynType))),
@@ -541,6 +543,7 @@ func CompileGraphSpec(spec *graph.GraphSpec, typeInfo *TypeSource) (*CompiledGra
 			krocel.WithCustomDeclarations(celReadyFunction()),
 			krocel.WithCustomDeclarations(celUpdatedFunction()),
 			krocel.WithCustomDeclarations(celDependenciesFunction()),
+			krocel.WithCustomDeclarations(celOCIFunction()),
 			krocel.WithCustomDeclarations([]cel.EnvOption{
 				cel.Variable(ReservedNodeReadyVar, cel.MapType(cel.StringType, cel.BoolType)),
 				cel.Variable(ReservedDepsMapVar, cel.MapType(cel.StringType, cel.ListType(cel.DynType))),

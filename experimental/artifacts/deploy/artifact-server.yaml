@@ -1,0 +1,86 @@
+# Deployment, Service, and APIService for the artifact server.
+# The artifact server is an aggregated API server that serves virtual Artifact
+# resources backed by OCI registry content.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kro-artifact-server
+  namespace: kro-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kro-artifact-server
+  namespace: kro-system
+  labels:
+    app: kro-artifact-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kro-artifact-server
+  template:
+    metadata:
+      labels:
+        app: kro-artifact-server
+    spec:
+      serviceAccountName: kro-artifact-server
+      containers:
+        - name: server
+          image: ko://github.com/kubernetes-sigs/kro/experimental/artifacts/cmd
+          args:
+            - --bind-address=:8443
+          ports:
+            - containerPort: 8443
+              name: https
+          terminationMessagePolicy: FallbackToLogsOnError
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8443
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8443
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8443
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kro-artifact-server
+  namespace: kro-system
+spec:
+  selector:
+    app: kro-artifact-server
+  ports:
+    - port: 443
+      targetPort: 8443
+      protocol: TCP
+---
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1alpha1.artifacts.kro.run
+spec:
+  group: artifacts.kro.run
+  version: v1alpha1
+  service:
+    name: kro-artifact-server
+    namespace: kro-system
+  groupPriorityMinimum: 100
+  versionPriority: 100
+  insecureSkipTLSVerify: true
