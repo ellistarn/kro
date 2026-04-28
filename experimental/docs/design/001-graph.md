@@ -517,18 +517,16 @@ status:
 ### Topological Order
 
 `status.topologicalOrder` is a map with the key `nodes` holding the Graph's own DAG in topological
-order. When the Graph pre-compiles a forEach child Graph (see
-[004-compilation § Pre-compilation](004-compilation.md#recursive-compilation)), the child's topology
-is stored as a sibling key named after the forEach node:
+order. When the Graph pre-compiles a forEach child Graph, the child's topology is stored as a
+sibling key named after the forEach node:
 
 ```yaml
 topologicalOrder:
-  nodes: ["schema", "validation", "crd", "watchInstances", "instances", "rgdStatus"]
-  instances: ["schema", "deploymentA", "serviceAccountA", "deploymentB", "rgdInstanceStatus"]
+  nodes: ["a", "b", "c"]
+  b: ["x", "y", "z"]
 ```
 
-Consumers read the child key directly — e.g., `graph.status.topologicalOrder.instances` gives the
-instance sub-Graph's resource topology without requiring an instance to exist.
+The child's topology is available before any child Graph CR exists.
 
 The Graph's status contains only controller-managed fields. There are no user-defined status
 fields on the Graph itself. User-defined status (e.g., `deploymentReady`, `address`) lives on custom

@@ -111,6 +111,10 @@ spec:
                     ? {"valid": false, "message": "forEach iterator conflicts with resource ID"}
                     : schema.?spec.?schema.?status.orValue({}).size() > 0 && schema.spec.schema.status.exists(k, !string(schema.spec.schema.status[k]).contains("${"))
                     ? {"valid": false, "message": "failed to build instance status schema: status fields without expressions are not supported"}
+                    : checks.resources.exists(r, !has(r.externalRef) && has(r.template) && (!has(r.template.apiVersion) || !has(r.template.kind) || !has(r.template.metadata)))
+                    ? {"valid": false, "message": "resource " + checks.resources.filter(r, !has(r.externalRef) && has(r.template) && (!has(r.template.apiVersion) || !has(r.template.kind) || !has(r.template.metadata)))[0].id + " is not a valid Kubernetes object: missing apiVersion, kind, or metadata"}
+                    : checks.resources.exists(r, !has(r.externalRef) && has(r.template) && has(r.template.apiVersion) && !string(r.template.apiVersion).contains("${") && !string(r.template.apiVersion).matches("^([a-zA-Z0-9][a-zA-Z0-9.-]*/)?v[0-9]+((?:alpha|beta)[0-9]+)?$"))
+                    ? {"valid": false, "message": "resource " + checks.resources.filter(r, !has(r.externalRef) && has(r.template) && has(r.template.apiVersion) && !string(r.template.apiVersion).contains("${") && !string(r.template.apiVersion).matches("^([a-zA-Z0-9][a-zA-Z0-9.-]*/)?v[0-9]+((?:alpha|beta)[0-9]+)?$"))[0].id + " has invalid apiVersion format"}
                     : {"valid": true, "message": ""}
                   }
 

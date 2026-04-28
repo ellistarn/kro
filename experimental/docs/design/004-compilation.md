@@ -184,11 +184,9 @@ Pre-compilation requires literal apiVersion/kind and a literal node list. When c
 met, the child compiles independently at reconcile time. Missing CRDs in the child scope are handled
 the same way as at the parent level -- typed permissively, narrowed when schemas become available.
 
-The pre-compiled child's topological order is stored on the parent Graph's
-`status.topologicalOrder` under the forEach node's ID as key (see
-[001-graph § Topological Order](001-graph.md#topological-order)). This makes the child's resource
-topology available before any child Graph CR exists -- critical for the RGD controller, which must
-report `topologicalOrder` on the RGD status before any instance is created.
+Pre-compilation also produces the child's topological order, stored on the parent Graph's
+`status.topologicalOrder` under the forEach node's ID as key. The child's topology is available
+before any child Graph CR exists.
 
 Errors from both mechanisms carry enough context to trace back to the exact location in the parent
 spec: parent node, deferral depth, child node, inner expression.

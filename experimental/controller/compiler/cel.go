@@ -162,10 +162,9 @@ type CompiledGraph struct {
 	CollectionIDs map[string]bool
 
 	// ChildTopologies maps forEach node ID → pre-compiled child topological
-	// order, populated by precompileExpressionChildGraphs. For the RGD
-	// sub-Graph, "instances" maps to the resource topology — available
-	// before any instance exists. Nil when no expression-valued child
-	// Graphs exist.
+	// order, populated by precompileExpressionChildGraphs. Available before
+	// any child Graph CR exists. Nil when no expression-valued child Graphs
+	// exist.
 	ChildTopologies map[string][]string
 
 	// resourceSchemas maps node ID → resolved OpenAPI schema. Used at Eval
