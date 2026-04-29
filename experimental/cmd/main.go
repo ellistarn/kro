@@ -1,7 +1,7 @@
 // Binary entrypoint for the experimental Graph controller.
 //
 // CRDs are installed by the Helm chart (experimental/chart/).
-// Stdlib is applied by the controller on startup.
+// Stdlib Graphs are installed by the Helm chart (experimental/chart-stdlib/).
 //
 // For local development, apply CRDs manually first:
 //
@@ -10,7 +10,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"net/http"
@@ -25,11 +24,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	graphcontroller "github.com/kubernetes-sigs/kro/experimental/controller"
-	"github.com/kubernetes-sigs/kro/experimental/stdlib"
 )
 
 func main() {
@@ -91,16 +88,6 @@ func main() {
 	shutdown, caches, err := graphcontroller.SetupWithManager(mgr, cfg, maxWorkers, nodeResyncInterval)
 	if err != nil {
 		log.Error(err, "setting up controller")
-		os.Exit(1)
-	}
-
-	// Apply stdlib after caches sync. The Runnable runs post-leader-election.
-	// Resources with unknown CRDs (e.g., Kind) fail and are retried until
-	// the controller creates them.
-	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		return stdlib.Apply(ctx, ctrl.Log.WithName("stdlib"), cfg)
-	})); err != nil {
-		log.Error(err, "registering stdlib")
 		os.Exit(1)
 	}
 

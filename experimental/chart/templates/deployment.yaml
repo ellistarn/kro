@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: graph-controller
-  namespace: kro-system
+  namespace: {{ .Release.Namespace }}
   labels:
     app: graph-controller
 spec:

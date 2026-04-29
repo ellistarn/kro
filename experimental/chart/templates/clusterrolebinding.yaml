@@ -9,4 +9,4 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: graph-controller
-    namespace: kro-system
+    namespace: {{ .Release.Namespace }}

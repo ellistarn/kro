@@ -69,11 +69,15 @@ run: ## Run the graph controller locally (apply CRDs first).
 .PHONY: apply
 apply: ## Build image with ko and deploy via helm.
 	cd $(ROOT) && helm upgrade --install krocodile experimental/chart/ \
+		-n kro-system --create-namespace \
 		--set image=$$($(KO) build --bare ./experimental/cmd/)
+	cd $(ROOT) && helm upgrade --install krocodile-stdlib experimental/chart-stdlib/ \
+		-n kro-system
 
 .PHONY: delete
-delete: ## Uninstall the chart from the current cluster.
-	helm uninstall krocodile
+delete: ## Uninstall the charts from the current cluster.
+	helm uninstall krocodile-stdlib -n kro-system --wait
+	helm uninstall krocodile -n kro-system
 
 .PHONY: test
 test: ## Run tests with verbose output.
