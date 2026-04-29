@@ -25,6 +25,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+
+	"github.com/kubernetes-sigs/kro/experimental/stdlib"
 )
 
 var (
@@ -188,6 +190,15 @@ func TestMain(m *testing.M) {
 		// Binary crashed or didn't become healthy — stop it and fail.
 		cmd.Process.Signal(syscall.SIGKILL) //nolint:errcheck
 		panic("waiting for binary readiness: " + err.Error())
+	}
+
+	// -----------------------------------------------------------------------
+	// 6b. Apply stdlib — the controller is pure substrate, tests install
+	//     what they need.
+	// -----------------------------------------------------------------------
+	if err := stdlib.Apply(ctx, logf.Log.WithName("stdlib"), cfg); err != nil {
+		cmd.Process.Signal(syscall.SIGKILL) //nolint:errcheck
+		panic("applying stdlib: " + err.Error())
 	}
 
 	// -----------------------------------------------------------------------
