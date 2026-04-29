@@ -62,12 +62,18 @@ vet: ## Run go vet against experimental code.
 	cd $(ROOT) && go vet ./experimental/...
 
 .PHONY: run
-run: ## Run the graph controller locally (bootstraps CRDs automatically).
-	cd $(ROOT) && go run ./experimental/cmd/ --bootstrap
+run: ## Run the graph controller locally (apply CRDs first).
+	cd $(ROOT) && kubectl apply -f experimental/chart/crds/
+	cd $(ROOT) && go run ./experimental/cmd/
 
 .PHONY: apply
-apply: ## Build and deploy the graph controller to the current cluster.
-	cd $(ROOT) && $(KO) apply --bare -f experimental/deploy/
+apply: ## Build image with ko and deploy via helm.
+	cd $(ROOT) && helm upgrade --install krocodile experimental/chart/ \
+		--set image=$$($(KO) build --bare ./experimental/cmd/)
+
+.PHONY: delete
+delete: ## Uninstall the chart from the current cluster.
+	helm uninstall krocodile
 
 .PHONY: test
 test: ## Run tests with verbose output.
