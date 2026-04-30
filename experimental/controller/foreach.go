@@ -119,6 +119,16 @@ func (r *GraphReconciler) reconcileForEach(ctx context.Context, graph *unstructu
 	// stable, all cached hashes become stale and items are re-evaluated.
 	contextHash := hashForEachContext(eval.scope, node.Dependencies)
 
+	// Retain watches from the previous cycle for this forEach node. Items
+	// that are skipped (unchanged) don't call applySSA, which means they
+	// don't re-register their scalar watches. Without this retain, those
+	// watches become stale and get released at flush time, breaking event
+	// routing for externally-mutated resources (e.g., a sub-graph updating
+	// its own status).
+	if watcher != nil && len(prevItemScope) > 0 {
+		watcher.RetainWatches(node.ID)
+	}
+
 	// Diff: identify changed, unchanged, and removed items.
 	var allApplied []any
 	var childErrors []error                     // track per-child errors for state derivation

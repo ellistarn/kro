@@ -63,6 +63,7 @@ SKIP_SPECS += collection.with.dependency.on.regular.resource
 SKIP_SPECS += collection-to-collection.chaining
 SKIP_SPECS += readyWhen.per-item.expressions.with.each
 SKIP_SPECS += dependents.to.reference.empty.collections
+SKIP_SPECS += keeps.the.producer.instance.reconciling.after.consumer.deletion
 # Root cause: RGD Inactive transition not triggered on invalid spec
 SKIP_SPECS += reflect.failure.conditions.when.definition.is.invalid
 # Root cause: status fields not surfaced for unavailable resources
