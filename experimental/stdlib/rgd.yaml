@@ -91,9 +91,9 @@ spec:
 
             - id: checks
               def:
-                resources: '$${has(schema.spec.resources) ? schema.spec.resources : []}'
+                resources: '$${schema.?spec.?resources.orValue([])}'
                 reserved: '$${["apiVersion","context","dependency","dependencies","each","externalRef","externalReference","externalRefs","externalReferences","graph","instance","item","items","kind","kro","metadata","namespace","object","resource","resourcegraphdefinition","resourceGraphDefinition","resources","root","runtime","schema","self","serviceAccountName","spec","status","this","variables","vars","version"]}'
-                allIDs: '$${has(schema.spec.resources) ? schema.spec.resources.map(r, r.id) : []}'
+                allIDs: '$${schema.?spec.?resources.orValue([]).map(r, r.id)}'
 
             - id: validation
               def:
