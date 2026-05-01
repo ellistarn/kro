@@ -115,12 +115,12 @@ run: ## Run the graph controller locally (apply CRDs first).
 
 .PHONY: apply
 apply: ## Build image with ko and deploy via helm.
-	helm upgrade --install krocodile-crds $(EXPDIR)/chart-crds/ \
+	cd $(EXPDIR) && helm upgrade --install krocodile-crds chart-crds/ \
 		-n kro-system --create-namespace
-	cd $(EXPDIR) && helm upgrade --install krocodile $(EXPDIR)/chart/ \
+	cd $(EXPDIR) && helm upgrade --install krocodile chart/ \
 		-n kro-system \
 		--set image=$$($(KO) build --bare ./cmd/)
-	helm upgrade --install krocodile-stdlib $(EXPDIR)/chart-stdlib/ \
+	cd $(EXPDIR) && helm upgrade --install krocodile-stdlib chart-stdlib/ \
 		-n kro-system
 
 .PHONY: delete
