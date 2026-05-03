@@ -1,0 +1,176 @@
+# .skills/simplify/budgets/controller.yaml
+#
+# Complexity budget for experimental/controller/
+# Derived from experimental/docs/design/001-007
+#
+# Each concept declares the minimum branches any correct implementation must pay.
+# Keywords are matched as substrings in branch condition source text.
+
+concepts:
+  - name: "Node Type Dispatch"
+    design: "001-graph.md"
+    keywords:
+      - "NodeTypeTemplate"
+      - "NodeTypePatch"
+      - "NodeTypeRef"
+      - "NodeTypeWatch"
+      - "NodeTypeDef"
+    min_branches: 5
+    notes: "Five node types, each with distinct reconcile/apply/prune behavior"
+
+  - name: "Modifier Gating"
+    design: "001-graph.md"
+    keywords:
+      - "ForEach"
+      - "IncludeWhen"
+      - "ReadyWhen"
+      - "PropagateWhen"
+      - "Finalizes"
+    min_branches: 5
+    notes: "Five modifiers checked per node evaluation"
+
+  - name: "Node State Classification"
+    design: "005-reconciliation.md"
+    keywords:
+      - "NodeReady"
+      - "NodeNotReady"
+      - "NodePending"
+      - "NodeExcluded"
+      - "NodeBlocked"
+      - "NodeConflict"
+      - "NodeError"
+      - "NodeSystemError"
+    min_branches: 8
+    notes: "Eight node states with distinct dependent and resolution behavior"
+
+  - name: "Dependency Gating"
+    design: "005-reconciliation.md"
+    keywords:
+      - "gateExcluded"
+      - "gateBlocked"
+      - "gatePending"
+      - "gatePass"
+      - "DepHard"
+      - "DepLazy"
+    min_branches: 6
+    notes: "Four gate outcomes + hard/lazy dependency classification"
+
+  - name: "Error Sentinels"
+    design: "005-reconciliation.md"
+    keywords:
+      - "ErrPending"
+      - "ErrWaitingForReadiness"
+      - "ErrReadyWhenFailed"
+      - "ErrFieldConflict"
+      - "ErrEvaluation"
+      - "ErrInvalidExpression"
+    min_branches: 6
+    notes: "Error sentinels that map to node states"
+
+  - name: "Delete Preflight"
+    design: "003-ownership.md"
+    keywords:
+      - "deleteReady"
+      - "deleteNotFound"
+      - "deleteNotOwned"
+      - "deleteBlockedByFieldManagers"
+      - "deleteSkipParseFailed"
+    min_branches: 5
+    notes: "Five outcomes from the delete preflight check"
+
+  - name: "Finalization State Machine"
+    design: "005-reconciliation.md"
+    keywords:
+      - "FinalizationCreating"
+      - "FinalizationWaitingReady"
+      - "activeFinalization"
+    min_branches: 3
+    notes: "Three-phase finalization: creating, waiting-ready, complete"
+
+  - name: "Ownership Semantics"
+    design: "003-ownership.md"
+    keywords:
+      - "ForceApply"
+      - "forceApply"
+      - "ReleaseApply"
+      - "releaseApply"
+      - "hasStatusSubresource"
+      - "HasStatusSubresource"
+    min_branches: 4
+    notes: "Force apply, release apply, status subresource split"
+
+  - name: "Prune Action"
+    design: "003-ownership.md"
+    keywords:
+      - "pruneResources"
+      - "deletePreflight"
+      - "deleteByKeys"
+      - "releaseApply"
+    min_branches: 3
+    notes: "template→delete, patch→release, ref/watch/def→no-op"
+
+  - name: "Revision Lifecycle"
+    design: "002-revisions.md"
+    keywords:
+      - "ensureRevision"
+      - "supersededRevision"
+      - "gcSuperseded"
+      - "GraphRevision"
+    min_branches: 3
+    notes: "Create, supersede, garbage-collect revisions"
+
+  - name: "Compilation Lifecycle"
+    design: "004-compilation.md"
+    keywords:
+      - "CompileGraphSpec"
+      - "ResolveNodeTypes"
+      - "needsRecompile"
+      - "SchemaGeneration"
+      - "HasDynamicGVR"
+      - "dynamicGVK"
+    min_branches: 4
+    notes: "Compile, recompile on schema change, dynamic GVK resolution"
+
+  - name: "Graph Deletion"
+    design: "005-reconciliation.md"
+    keywords:
+      - "DeletionTimestamp"
+      - "deletionTimestamp"
+      - "ownerDeleting"
+      - "reconcileDelete"
+      - "ContainsFinalizer"
+    min_branches: 3
+    notes: "Deletion detection, finalizer management, teardown"
+
+  - name: "Deferred Expressions"
+    design: "004-compilation.md"
+    keywords:
+      - "DeferralLevel"
+      - "StripDeferralLevel"
+      - "ChildScope"
+      - "IsGraphCRLiteral"
+    min_branches: 3
+    notes: "Nested graph pre-compilation and deferred expression handling"
+
+  - name: "Watch Coordination"
+    design: "005-reconciliation.md"
+    keywords:
+      - "WatchScalar"
+      - "WatchCollection"
+      - "DeriveAppliedSet"
+      - "RouteEvent"
+      - "EnsureWatch"
+    min_branches: 3
+    notes: "Scalar vs collection watches, applied set derivation, event routing"
+
+  - name: "ForEach Expansion"
+    design: "005-reconciliation.md"
+    keywords:
+      - "reconcileForEach"
+      - "forEachCarryForward"
+      - "ForEachChildIdentityLabelKey"
+      - "isForEachItemUpdated"
+      - "__updated"
+      - "__ready"
+    min_branches: 4
+    notes: "Collection expansion with per-item propagation control"

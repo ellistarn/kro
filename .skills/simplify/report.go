@@ -15,6 +15,62 @@ type Report struct {
 	Packages   []PackageMetrics `json:"packages"`
 	Signals    Signals          `json:"signals"`
 	Violations PhasedViolations `json:"violations"`
+	Budget     *BudgetReport    `json:"budget,omitempty"`
+}
+
+// --- Budget attribution types ---
+
+type BudgetReport struct {
+	Functions []FunctionAttribution `json:"functions"`
+	Summary   BudgetSummary         `json:"summary"`
+}
+
+type FunctionAttribution struct {
+	Name              string               `json:"name"`
+	File              string               `json:"file"`
+	Line              int                  `json:"line"`
+	Receiver          string               `json:"receiver,omitempty"`
+	Cyclomatic        int                  `json:"cyclomatic"`
+	Attributed        []ConceptAttribution `json:"attributed"`
+	LanguageEssential []LanguageBranch     `json:"languageEssential"`
+	Unattributed      []UnattributedBranch `json:"unattributed"`
+	Summary           AttributionSummary   `json:"summary"`
+}
+
+type ConceptAttribution struct {
+	Concept  string   `json:"concept"`
+	Count    int      `json:"count"`
+	Keywords []string `json:"keywords"`
+	Lines    []int    `json:"lines"`
+}
+
+type LanguageBranch struct {
+	Pattern string `json:"pattern"`
+	Count   int    `json:"count"`
+	Lines   []int  `json:"lines"`
+}
+
+type UnattributedBranch struct {
+	Line           int      `json:"line"`
+	Text           string   `json:"text"`
+	PartialMatches []string `json:"partialMatches,omitempty"`
+}
+
+type AttributionSummary struct {
+	Attributed        int     `json:"attributed"`
+	LanguageEssential int     `json:"languageEssential"`
+	Unattributed      int     `json:"unattributed"`
+	AttributedRatio   float64 `json:"attributedRatio"`
+	UnattributedRatio float64 `json:"unattributedRatio"`
+}
+
+type BudgetSummary struct {
+	FunctionsAnalyzed   int    `json:"functionsAnalyzed"`
+	FullyAttributed     int    `json:"fullyAttributed"`
+	HighestUnattributed string `json:"highestUnattributed"`
+	TotalAttributed     int    `json:"totalAttributed"`
+	TotalLanguage       int    `json:"totalLanguage"`
+	TotalUnattributed   int    `json:"totalUnattributed"`
 }
 
 type PackageMetrics struct {
@@ -259,6 +315,11 @@ func formatText(w io.Writer, r *Report) {
 	// Signals.
 	formatSignalsText(w, &r.Signals)
 
+	// Budget attribution.
+	if r.Budget != nil {
+		formatBudgetText(w, r.Budget)
+	}
+
 	// Violations by phase.
 	formatViolationsText(w, &r.Violations)
 }
@@ -456,4 +517,93 @@ func formatViolationsText(w io.Writer, v *PhasedViolations) {
 		}
 		fmt.Fprintln(w)
 	}
+}
+
+func formatBudgetText(w io.Writer, b *BudgetReport) {
+	fmt.Fprintln(w, "=== Budget Attribution ===")
+	fmt.Fprintln(w)
+
+	for _, fa := range b.Functions {
+		name := fa.Name
+		if fa.Receiver != "" {
+			name = fa.Receiver + "." + fa.Name
+		}
+
+		if fa.Summary.Unattributed == 0 {
+			// Fully attributed — one-line summary.
+			fmt.Fprintf(w, "%s (%s:%d) — cyclomatic: %d — fully attributed (%d attributed, %d language)\n",
+				name, fa.File, fa.Line, fa.Cyclomatic,
+				fa.Summary.Attributed, fa.Summary.LanguageEssential)
+			continue
+		}
+
+		fmt.Fprintf(w, "%s (%s:%d) — cyclomatic: %d\n", name, fa.File, fa.Line, fa.Cyclomatic)
+
+		// Attributed concepts.
+		if len(fa.Attributed) > 0 {
+			fmt.Fprintln(w, "  Attributed:")
+			for _, ca := range fa.Attributed {
+				fmt.Fprintf(w, "    %-30s %d  %s\n", ca.Concept+":", ca.Count, "["+strings.Join(ca.Keywords, ", ")+"]")
+			}
+		}
+
+		// Language-essential.
+		if len(fa.LanguageEssential) > 0 {
+			var langParts []string
+			for _, lb := range fa.LanguageEssential {
+				if lb.Count > 1 {
+					langParts = append(langParts, fmt.Sprintf("%s ×%d", lb.Pattern, lb.Count))
+				} else {
+					langParts = append(langParts, lb.Pattern)
+				}
+			}
+			langTotal := 0
+			for _, lb := range fa.LanguageEssential {
+				langTotal += lb.Count
+			}
+			fmt.Fprintf(w, "  Language-essential:          %d  [%s]\n", langTotal, strings.Join(langParts, ", "))
+		}
+
+		// Divider and summary.
+		total := fa.Summary.Attributed + fa.Summary.LanguageEssential + fa.Summary.Unattributed
+		fmt.Fprintln(w, "  ─────────────")
+		if total > 0 {
+			fmt.Fprintf(w, "  Attributed:    %2d (%d%%)\n", fa.Summary.Attributed, int(fa.Summary.AttributedRatio*100))
+			fmt.Fprintf(w, "  Language:      %2d (%d%%)\n", fa.Summary.LanguageEssential, percent(fa.Summary.LanguageEssential, total))
+			fmt.Fprintf(w, "  Unattributed: %2d (%d%%)\n", fa.Summary.Unattributed, int(fa.Summary.UnattributedRatio*100))
+		}
+
+		// Unattributed branches.
+		if len(fa.Unattributed) > 0 {
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, "  Unattributed branches:")
+			for _, ub := range fa.Unattributed {
+				partial := ""
+				if len(ub.PartialMatches) > 0 {
+					partial = "  [partial: " + strings.Join(ub.PartialMatches, ", ") + "]"
+				}
+				fmt.Fprintf(w, "    L%d:  %s%s\n", ub.Line, ub.Text, partial)
+			}
+		}
+		fmt.Fprintln(w)
+	}
+
+	// Overall summary.
+	fmt.Fprintln(w, "Budget Summary:")
+	fmt.Fprintf(w, "  Functions analyzed:   %d\n", b.Summary.FunctionsAnalyzed)
+	fmt.Fprintf(w, "  Fully attributed:     %d\n", b.Summary.FullyAttributed)
+	fmt.Fprintf(w, "  Total attributed:     %d\n", b.Summary.TotalAttributed)
+	fmt.Fprintf(w, "  Total language:       %d\n", b.Summary.TotalLanguage)
+	fmt.Fprintf(w, "  Total unattributed:   %d\n", b.Summary.TotalUnattributed)
+	if b.Summary.HighestUnattributed != "" {
+		fmt.Fprintf(w, "  Highest unattributed: %s\n", b.Summary.HighestUnattributed)
+	}
+	fmt.Fprintln(w)
+}
+
+func percent(n, total int) int {
+	if total == 0 {
+		return 0
+	}
+	return n * 100 / total
 }

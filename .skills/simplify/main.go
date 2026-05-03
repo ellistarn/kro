@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"go/ast"
 	"os"
 	"time"
 )
@@ -15,6 +16,7 @@ import (
 func main() {
 	dir := flag.String("dir", "", "directory to use as working directory for package resolution")
 	format := flag.String("format", "json", "output format: json or text")
+	budgetPath := flag.String("budget", "", "path to YAML budget file for complexity attribution")
 	flag.Parse()
 
 	args := flag.Args()
@@ -70,6 +72,35 @@ func main() {
 
 	// Compute violations grouped by phase.
 	report.Violations = computeViolations(report.Packages)
+
+	// Budget attribution analysis.
+	if *budgetPath != "" {
+		budget, err := loadBudgetFile(*budgetPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error loading budget file: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Collect all function AST nodes keyed by file:name for lookup.
+		allFuncs := map[string]*ast.FuncDecl{}
+		for _, pkg := range pkgs {
+			for _, file := range pkg.Syntax {
+				absPath := fset.Position(file.Pos()).Filename
+				fname := relativePath(absPath, baseDir)
+				for _, decl := range file.Decls {
+					if fn, ok := decl.(*ast.FuncDecl); ok {
+						key := fname + ":" + fn.Name.Name
+						if fn.Recv != nil {
+							key = fname + ":" + receiverTypeName(fn) + "." + fn.Name.Name
+						}
+						allFuncs[key] = fn
+					}
+				}
+			}
+		}
+
+		report.Budget = analyzeBudget(budget, report.Packages, fset, allFuncs)
+	}
 
 	switch *format {
 	case "text":
