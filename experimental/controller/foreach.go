@@ -19,8 +19,10 @@ import (
 
 // reconcileForEach iterates a collection and stamps the template per item.
 //
-// No state is carried between reconciles — each cycle evaluates fresh.
-func (c *clusterAccess) reconcileForEach(ctx context.Context, rs *reconcileScope, node graphpkg.Node, eval *evaluator) (*nodeOutput, error) {
+// When the forEach binding is self-contained (ForEach.SelfContained == true),
+// unchanged collection items are skipped — their previous scope entries and
+// applied keys are carried forward. Per 005-reconciliation-optimized.md.
+func (c *clusterAccess) reconcileForEach(ctx context.Context, rs *reconcileScope, node graphpkg.Node, eval *evaluator, state *instanceState) (*nodeOutput, error) {
 	logger := log.FromContext(ctx)
 	var keys []Applied
 	// Per-item propagateWhen gate. Per 001-graph.md § propagateWhen:
@@ -68,6 +70,36 @@ func (c *clusterAccess) reconcileForEach(ctx context.Context, rs *reconcileScope
 		currentOrder = append(currentOrder, id)
 	}
 
+	// --- forEach incremental evaluation optimization ---
+	// Per 005-reconciliation-optimized.md: when the binding is self-contained,
+	// hash each item and skip unchanged items (carry forward previous results).
+	selfContained := node.ForEach.SelfContained
+	var currentHashes map[string]uint64
+	var unchangedItems map[string]bool
+	if selfContained && state != nil {
+		currentHashes = make(map[string]uint64, len(currentItems))
+		unchangedItems = make(map[string]bool, len(currentItems))
+		prevHashes := state.forEachItemHashes[node.ID]
+		for id, item := range currentItems {
+			h := HashValue(item)
+			currentHashes[id] = h
+			if prevHashes != nil {
+				if prevHash, exists := prevHashes[id]; exists && prevHash == h {
+					// Item unchanged — can skip if previous scope/keys exist.
+					if state.forEachPreviousScope != nil && state.forEachPreviousScope[node.ID] != nil {
+						if _, hasPrev := state.forEachPreviousScope[node.ID][id]; hasPrev {
+							unchangedItems[id] = true
+						}
+					}
+				}
+			}
+		}
+		if len(unchangedItems) > 0 {
+			logger.V(1).Info("forEach incremental: skipping unchanged items",
+				"node", node.ID, "unchanged", len(unchangedItems), "total", len(currentItems))
+		}
+	}
+
 	// Pre-evaluate readiness by fetching each item's resource from the
 	// cache and evaluating readyWhen. This replaces carry-forward readiness
 	// with fresh per-cycle evaluation. Cache hits make this cheap.
@@ -78,11 +110,19 @@ func (c *clusterAccess) reconcileForEach(ctx context.Context, rs *reconcileScope
 	// readiness class, random."
 	sortForEachByReadiness(currentOrder, readinessMap)
 
-	// Evaluate every item every time (simple, correct).
+	// Evaluate items. When self-contained, unchanged items are skipped —
+	// their previous scope entries and applied keys are carried forward.
 	var allApplied []any
 	var childErrors []error                     // track per-child errors for state derivation
 	seenResourceKeys := make(map[string]string) // resource key → item identity
 	halted := false
+	// Track per-item scope and keys for carry-forward to next reconcile.
+	var newItemScope map[string]any
+	var newItemKeys map[string][]Applied
+	if selfContained && state != nil {
+		newItemScope = make(map[string]any, len(currentItems))
+		newItemKeys = make(map[string][]Applied, len(currentItems))
+	}
 	for _, id := range currentOrder {
 		// --- Per-item propagateWhen gate ---
 		if hasPerItemGate && !halted {
@@ -103,6 +143,23 @@ func (c *clusterAccess) reconcileForEach(ctx context.Context, rs *reconcileScope
 
 		item := currentItems[id]
 
+		// --- forEach incremental: skip unchanged items ---
+		if unchangedItems[id] {
+			// Carry forward previous scope entry and keys.
+			prevScope := state.forEachPreviousScope[node.ID][id]
+			allApplied = append(allApplied, prevScope)
+			if prevItemKeys := state.forEachPreviousKeys[node.ID][id]; prevItemKeys != nil {
+				keys = append(keys, prevItemKeys...)
+			}
+			if newItemScope != nil {
+				newItemScope[id] = prevScope
+			}
+			if newItemKeys != nil {
+				newItemKeys[id] = state.forEachPreviousKeys[node.ID][id]
+			}
+			continue
+		}
+
 		if !node.HasBody() {
 			continue
 		}
@@ -122,6 +179,9 @@ func (c *clusterAccess) reconcileForEach(ctx context.Context, rs *reconcileScope
 			// Definitions are always re-evaluated — vacuously updated.
 			evalMap["__updated"] = true
 			allApplied = append(allApplied, evalMap)
+			if newItemScope != nil {
+				newItemScope[id] = evalMap
+			}
 			// No keys — definition nodes have no managed resources.
 			continue
 		}
@@ -183,6 +243,12 @@ func (c *clusterAccess) reconcileForEach(ctx context.Context, rs *reconcileScope
 			HasStatus: evalMap["status"] != nil,
 		}}
 		keys = append(keys, itemKeys...)
+		if newItemScope != nil {
+			newItemScope[id] = applied.Object
+		}
+		if newItemKeys != nil {
+			newItemKeys[id] = itemKeys
+		}
 
 		// Inline readyWhen stamp: required when per-item
 		// propagateWhen is active so the gate expression sees
@@ -228,6 +294,22 @@ func (c *clusterAccess) reconcileForEach(ctx context.Context, rs *reconcileScope
 		if len(node.ReadyWhen) > 0 {
 			logger.V(1).Info("all forEach items ready", "node", node.ID)
 		}
+	}
+
+	// --- Store per-item hashes and scope for next reconcile ---
+	if selfContained && state != nil && currentHashes != nil {
+		if state.forEachItemHashes == nil {
+			state.forEachItemHashes = make(map[string]map[string]uint64)
+		}
+		state.forEachItemHashes[node.ID] = currentHashes
+		if state.forEachPreviousScope == nil {
+			state.forEachPreviousScope = make(map[string]map[string]any)
+		}
+		state.forEachPreviousScope[node.ID] = newItemScope
+		if state.forEachPreviousKeys == nil {
+			state.forEachPreviousKeys = make(map[string]map[string][]Applied)
+		}
+		state.forEachPreviousKeys[node.ID] = newItemKeys
 	}
 
 	return &nodeOutput{keys: keys}, nil

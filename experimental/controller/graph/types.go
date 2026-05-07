@@ -125,6 +125,14 @@ func NodeTypeFromLabelValue(s string) (NodeType, bool) {
 type ForEachBinding struct {
 	VarName string // CEL scope variable name
 	Expr    string // CEL expression yielding the collection
+
+	// SelfContained is true when the child template's dependencies are
+	// fully captured by the iterator variable. When true, an unchanged
+	// collection item produces an unchanged template — enabling the
+	// forEach incremental evaluation optimization (skip unchanged items).
+	// Set by the compiler when every field path in the child template
+	// resolves within the iterator variable.
+	SelfContained bool
 }
 
 // Node is a parsed Graph node entry — a user's declaration of intent about

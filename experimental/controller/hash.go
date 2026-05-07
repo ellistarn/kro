@@ -182,6 +182,27 @@ func hexDigit(b byte) byte {
 	return 'a' + b - 10
 }
 
+// HashValue computes a deterministic FNV-64a hash of an arbitrary value.
+// Handles all types that appear in unstructured Kubernetes objects:
+// map[string]any, []any, string, float64, int64, int, bool, nil.
+func HashValue(v any) uint64 {
+	bp := bufPool.Get().(*[]byte)
+	buf := (*bp)[:0]
+
+	buf = appendValue(buf, v)
+
+	h := hashPool.Get().(hash.Hash64)
+	h.Reset()
+	h.Write(buf)
+	sum := h.Sum64()
+
+	*bp = buf
+	bufPool.Put(bp)
+	hashPool.Put(h)
+
+	return sum
+}
+
 // sortedKeys returns the keys of a map in sorted order.
 func sortedKeys(m map[string]any) []string {
 	keys := make([]string, 0, len(m))

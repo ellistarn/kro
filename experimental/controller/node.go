@@ -40,9 +40,9 @@ type nodeOutput struct {
 //   - ErrPending: retryable, data not yet available
 //   - ErrWaitingForReadiness: applied but readyWhen not satisfied
 //   - other error: fatal
-func reconcileNode(ctx context.Context, c *clusterAccess, rs *reconcileScope, node graphpkg.Node, eval *evaluator) (*nodeOutput, error) {
+func reconcileNode(ctx context.Context, c *clusterAccess, rs *reconcileScope, node graphpkg.Node, eval *evaluator, state *instanceState) (*nodeOutput, error) {
 	if node.ForEach != nil {
-		return c.reconcileForEach(ctx, rs, node, eval)
+		return c.reconcileForEach(ctx, rs, node, eval, state)
 	}
 
 	nodeType := node.Type()

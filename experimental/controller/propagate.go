@@ -304,7 +304,7 @@ func evaluateNode(ctx context.Context, c *clusterAccess, rs *reconcileScope, nod
 		eval.scope[depID] = celOptionalNone()
 	}
 
-	out, err := reconcileNode(ctx, c, rs, node, eval)
+	out, err := reconcileNode(ctx, c, rs, node, eval, state)
 
 	nr := nodeResult{
 		state: NodeReady,

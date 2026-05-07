@@ -1420,7 +1420,7 @@ func TestForEach_HaltedItemsMakeParentPending(t *testing.T) {
 
 	r := &GraphReconciler{}
 	rs := newReconcileScope(graph, nil)
-	_, err = r.cluster().reconcileForEach(context.Background(), rs, spec.Nodes[1], eval)
+	_, err = r.cluster().reconcileForEach(context.Background(), rs, spec.Nodes[1], eval, state)
 	// ErrPending expected — propagateWhen halted expansion, parent is Pending.
 	require.ErrorIs(t, err, ErrPending)
 
@@ -1468,7 +1468,7 @@ func TestForEach_DefinitionItemsAlwaysReEvaluated(t *testing.T) {
 
 	r := &GraphReconciler{}
 	rs := newReconcileScope(graph, nil)
-	_, err = r.cluster().reconcileForEach(context.Background(), rs, spec.Nodes[1], eval)
+	_, err = r.cluster().reconcileForEach(context.Background(), rs, spec.Nodes[1], eval, state)
 	require.NoError(t, err)
 
 	items, ok := eval.scope["results"].([]any)
@@ -1520,7 +1520,7 @@ func TestForEach_RegressionSharedContextPropagation(t *testing.T) {
 	eval.scope["config"] = map[string]any{"version": "v1"}
 	eval.scope["source"] = map[string]any{"names": names}
 
-	_, err = c.reconcileForEach(context.Background(), rs, resultsNode, eval)
+	_, err = c.reconcileForEach(context.Background(), rs, resultsNode, eval, state)
 	require.NoError(t, err)
 	items1, ok := eval.scope["results"].([]any)
 	require.True(t, ok)
@@ -1536,7 +1536,7 @@ func TestForEach_RegressionSharedContextPropagation(t *testing.T) {
 	eval2.scope["config"] = map[string]any{"version": "v2"}
 	eval2.scope["source"] = map[string]any{"names": names}
 
-	_, err = c.reconcileForEach(context.Background(), rs, resultsNode, eval2)
+	_, err = c.reconcileForEach(context.Background(), rs, resultsNode, eval2, state)
 	require.NoError(t, err)
 	items2, ok := eval2.scope["results"].([]any)
 	require.True(t, ok)

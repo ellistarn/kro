@@ -35,8 +35,14 @@ func (r *GraphReconciler) compileRevision(ctx context.Context, namespace string,
 	// instance's node specs.
 	dag := dagpkg.AssembleDAG(spec.Nodes, compiled.Topology)
 
-	// Always create fresh state — no cross-cycle preservation.
+	// Create fresh state; carry forward forEach item hashes from the previous
+	// instance (the only cross-cycle state, per 005-reconciliation-optimized.md).
 	state := newInstanceState(compiled, dag)
+	if prev := r.Caches.get(instanceKey); prev != nil {
+		state.forEachItemHashes = prev.forEachItemHashes
+		state.forEachPreviousScope = prev.forEachPreviousScope
+		state.forEachPreviousKeys = prev.forEachPreviousKeys
+	}
 	r.Caches.set(instanceKey, state)
 	return spec, state, nil
 }

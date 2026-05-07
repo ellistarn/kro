@@ -14,9 +14,28 @@ import (
 )
 
 // instanceState holds the compilation artifacts for a single reconcile cycle.
-// Created fresh every compileRevision call — no cross-cycle state.
+// Created fresh every compileRevision call. The only cross-cycle state is
+// forEachItemHashes, which is carried forward from the previous instance
+// to enable forEach incremental evaluation.
 type instanceState struct {
 	compilation compiledArtifacts
+
+	// forEachItemHashes stores per-item content hashes from the most recent
+	// reconcile cycle, keyed by node ID then item identity. Used by the
+	// forEach incremental evaluation optimization to skip unchanged items.
+	// Nil on cold start; populated after the first successful forEach
+	// evaluation for self-contained bindings.
+	forEachItemHashes map[string]map[string]uint64
+
+	// forEachPreviousScope stores the per-item scope entries from the most
+	// recent successful reconcile, keyed by node ID then item identity.
+	// Carried forward for unchanged items in self-contained forEach bindings.
+	forEachPreviousScope map[string]map[string]any
+
+	// forEachPreviousKeys stores the per-item applied keys from the most
+	// recent successful reconcile, keyed by node ID then item identity.
+	// Carried forward for unchanged items in self-contained forEach bindings.
+	forEachPreviousKeys map[string]map[string][]Applied
 }
 
 // compiledArtifacts holds the output of a single compilation.
