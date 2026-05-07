@@ -36,6 +36,21 @@ type instanceState struct {
 	// recent successful reconcile, keyed by node ID then item identity.
 	// Carried forward for unchanged items in self-contained forEach bindings.
 	forEachPreviousKeys map[string]map[string][]Applied
+
+	// previousNodeStates stores per-node states from the most recent
+	// reconcile. Used by scoped propagation to carry forward unaffected
+	// nodes without re-evaluation.
+	previousNodeStates map[string]NodeState
+
+	// previousScope stores per-node scope entries from the most recent
+	// reconcile. Used by scoped propagation to carry forward unaffected
+	// nodes' published values.
+	previousScope map[string]any
+
+	// previousNodeKeys stores per-node applied keys from the most recent
+	// reconcile. Used by scoped propagation to carry forward unaffected
+	// nodes' applied keys.
+	previousNodeKeys map[string][]Applied
 }
 
 // compiledArtifacts holds the output of a single compilation.

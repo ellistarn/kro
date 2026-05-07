@@ -73,6 +73,11 @@ type Topology struct {
 	// target becomes a prune candidate. The DAG records the relationship
 	// but finalization logic lives in the prune phase, not the walk.
 	Finalizers map[string][]string
+	// Reachability maps each node index to the set of node indices it can
+	// transitively reach via forward edges (Dependents). Computed once at
+	// build time. Used by scoped propagation to determine the affected set
+	// from a set of triggered nodes.
+	Reachability map[int]map[int]bool
 
 	// Per-node dependency metadata. Indexed by declaration order (same as
 	// Nodes). These are derived from expression paths during compilation
@@ -140,6 +145,9 @@ func BuildDAG(nodes []graph.Node, exprPaths map[string]map[string][]graph.FieldP
 
 	// Compute parallel levels from topological order.
 	dag.Levels = computeLevels(dag, order)
+
+	// Compute forward reachability (transitive closure of Dependents).
+	dag.Reachability = computeReachability(dag)
 
 	return dag, nil
 }
@@ -503,4 +511,41 @@ func detectCycleKahn(nodes []graph.Node, adj [][]int, inDegree []int) error {
 		return fmt.Errorf("graph contains a cycle: nodes %v (detected before compilation): %w", cycleIDs, ErrCircularDependency)
 	}
 	return nil
+}
+
+// computeReachability builds the forward-reachability map: for each node,
+// which other nodes can it eventually affect? Walks the Dependents adjacency
+// list (BFS) from each node in reverse topological order, accumulating
+// transitive closure. Since the graph is a DAG, processing in reverse
+// topological order lets us reuse child reachability sets.
+func computeReachability(dag *DAG) map[int]map[int]bool {
+	n := len(dag.Nodes)
+	reach := make(map[int]map[int]bool, n)
+
+	// Process in reverse topological order so that when we process node i,
+	// all of its direct dependents already have their reachability computed.
+	for i := len(dag.TopologicalOrder) - 1; i >= 0; i-- {
+		nodeIdx := dag.TopologicalOrder[i]
+		nodeID := dag.Nodes[nodeIdx].ID
+		set := make(map[int]bool)
+
+		for _, depIdx := range dag.Dependents[nodeID] {
+			// Direct dependent.
+			set[depIdx] = true
+			// Transitive: everything the dependent can reach.
+			for r := range reach[depIdx] {
+				set[r] = true
+			}
+		}
+		reach[nodeIdx] = set
+	}
+
+	// Remove empty entries to save memory.
+	for k, v := range reach {
+		if len(v) == 0 {
+			delete(reach, k)
+		}
+	}
+	_ = n // suppress unused warning in case n is 0
+	return reach
 }
