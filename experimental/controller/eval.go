@@ -385,11 +385,18 @@ func (e *evaluator) evaluateTree(value any) (any, error) {
 	}
 }
 
-// evalString processes a string value, handling ${...} and $${...} expressions.
+// evalString processes a string value, handling ${...} expressions.
+// A ${body} where body contains no inner ${...} is evaluated as CEL.
+// A ${body} where body contains inner ${...} is a deferral: strip the
+// outer ${} wrapper and output body literally.
 func (e *evaluator) evalString(s string) (any, error) {
 	// Check if the entire string is a single expression (standalone)
-	dollars, expr, start, end := graph.FindExpr(s, 0)
-	if start == 0 && end == len(s) && len(dollars) == 1 {
+	_, expr, start, end := graph.FindExpr(s, 0)
+	if start == 0 && end == len(s) {
+		if graph.IsDeferred(expr) {
+			// Deferral: strip outer ${} wrapper, return body literally
+			return expr, nil
+		}
 		result, err := e.compiled.Eval(expr, e.scope)
 		if err != nil {
 			if isCELPending(err) {
@@ -405,14 +412,17 @@ func (e *evaluator) evalString(s string) (any, error) {
 	var result strings.Builder
 	pos := 0
 	for {
-		dollars, expr, start, end = graph.FindExpr(s, pos)
+		_, expr, start, end = graph.FindExpr(s, pos)
 		if start < 0 {
 			result.WriteString(s[pos:])
 			break
 		}
 		result.WriteString(s[pos:start])
 
-		if len(dollars) == 1 {
+		if graph.IsDeferred(expr) {
+			// Deferral: strip outer ${} wrapper, output body literally
+			result.WriteString(expr)
+		} else {
 			val, err := e.compiled.Eval(expr, e.scope)
 			if err != nil {
 				if isCELPending(err) {
@@ -422,8 +432,6 @@ func (e *evaluator) evalString(s string) (any, error) {
 			}
 			e.accumulateTimeHint(expr)
 			result.WriteString(fmt.Sprintf("%v", val))
-		} else {
-			result.WriteString(dollars[1:] + "{" + expr + "}")
 		}
 		pos = end
 	}

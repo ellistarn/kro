@@ -7,7 +7,7 @@
 # Evaluation model:
 #   Each Graph is an independent Kubernetes object. KRO reconciles a Graph by:
 #   1. Evaluating ${...} expressions in its spec against its resource scope
-#   2. Stripping one $ from $${...} → ${...} (deferred to the next layer)
+#   2. Unwrapping one layer from ${${...}} → ${...} (deferred to the next layer)
 #   3. Creating/updating the resulting resources via the Kubernetes API
 #
 #   If a resource is itself a Graph, it gets persisted to the cluster and

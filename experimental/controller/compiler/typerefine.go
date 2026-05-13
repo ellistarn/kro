@@ -54,8 +54,8 @@ func refineDefTypes(nodes []graph.Node, ts *TypeSource, exprTypes map[string]*ce
 		if node.ForEach == nil {
 			continue
 		}
-		dollars, innerExpr, start, end := graph.FindExpr(node.ForEach.Expr, 0)
-		if start < 0 || len(dollars) != 1 || start != 0 || end != len(node.ForEach.Expr) {
+		_, innerExpr, start, end := graph.FindExpr(node.ForEach.Expr, 0)
+		if start < 0 || graph.IsDeferred(innerExpr) || start != 0 || end != len(node.ForEach.Expr) {
 			continue
 		}
 		ct, ok := exprTypes[innerExpr]
@@ -131,11 +131,11 @@ func narrowFieldType(path string, value any, exprTypes map[string]*cel.Type, nar
 // narrowStringType is like inferStringType but narrows standalone expressions
 // using the expression's compiled return type.
 func narrowStringType(s string, exprTypes map[string]*cel.Type, narrowed *bool) *apiservercel.DeclType {
-	dollars, expr, start, end := graph.FindExpr(s, 0)
+	_, expr, start, end := graph.FindExpr(s, 0)
 	if start < 0 {
 		return apiservercel.StringType
 	}
-	if start == 0 && end == len(s) && len(dollars) == 1 {
+	if start == 0 && end == len(s) && !graph.IsDeferred(expr) {
 		// Standalone expression — check if we have a compiled return type.
 		if ct, ok := exprTypes[expr]; ok && ct != cel.DynType && ct != cel.AnyType {
 			if dt := celTypeToDeclType(ct); dt != nil && dt != apiservercel.DynType {

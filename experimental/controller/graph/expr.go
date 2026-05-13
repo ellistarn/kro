@@ -5,8 +5,10 @@ import (
 	"strings"
 )
 
-// FindExpr finds the next $+{...} expression in input starting at pos,
+// FindExpr finds the next ${...} expression in input starting at pos,
 // handling balanced braces for nested CEL map/object literals.
+// Only matches a single '$' followed by '{'. Multi-dollar sequences ($$)
+// are skipped — that syntax is no longer valid.
 func FindExpr(input string, pos int) (string, string, int, int) {
 	for i := pos; i < len(input); i++ {
 		if input[i] != '$' {
@@ -19,6 +21,9 @@ func FindExpr(input string, pos int) (string, string, int, int) {
 		dollars := input[start:i]
 		if i >= len(input) || input[i] != '{' {
 			continue
+		}
+		if len(dollars) > 1 {
+			continue // multi-dollar ($$) is not a valid expression start
 		}
 		depth := 0
 		inString := false
@@ -58,6 +63,41 @@ func FindExpr(input string, pos int) (string, string, int, int) {
 		}
 	}
 	return "", "", -1, -1
+}
+
+// IsDeferred returns true if the expression body contains inner ${...} patterns
+// outside of string literals, indicating this expression is a deferral wrapper
+// rather than a CEL expression to evaluate.
+func IsDeferred(body string) bool {
+	inString := false
+	var stringChar byte
+	escapeNext := false
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		if escapeNext {
+			escapeNext = false
+			continue
+		}
+		if inString {
+			if c == '\\' {
+				escapeNext = true
+				continue
+			}
+			if c == stringChar {
+				inString = false
+			}
+			continue
+		}
+		if c == '\'' || c == '"' {
+			inString = true
+			stringChar = c
+			continue
+		}
+		if c == '$' && i+1 < len(body) && body[i+1] == '{' {
+			return true
+		}
+	}
+	return false
 }
 
 // NormalizeTypes converts JSON-style float64 numbers to int64 for CEL compatibility.
@@ -317,19 +357,19 @@ func checkDepsRef(expr string, nodeID string) error {
 }
 
 // WalkExpressions scans strs for ${...} expression blocks (skipping
-// deferred $${...} blocks) and calls fn for each expression found.
+// deferred nested expressions) and calls fn for each expression found.
 // This is the single iteration helper for the FindExpr scan loop.
 func WalkExpressions(strs []string, fn func(expr string)) {
 	for _, s := range strs {
 		pos := 0
 		for {
-			dollars, expr, start, _ := FindExpr(s, pos)
+			_, expr, start, end := FindExpr(s, pos)
 			if start < 0 {
 				break
 			}
-			pos = start + len(dollars) + len(expr) + 2
-			if len(dollars) != 1 {
-				continue // $${...} is deferred, not evaluated at this level
+			pos = end
+			if IsDeferred(expr) {
+				continue // nested ${} is deferred, not evaluated at this level
 			}
 			fn(expr)
 		}

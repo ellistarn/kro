@@ -315,7 +315,7 @@ func TestStdlibSingleton(t *testing.T) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // Kind wrapped in Graph (deferred expressions)
 //
-// When a Kind is created by an outer Graph using $${...} expressions, the
+// When a Kind is created by an outer Graph using ${${...}} expressions, the
 // compiler must recognize the Kind template's child scope (implicit "schema"
 // + spec.nodes IDs) and validate deferred expressions against it.
 //
@@ -330,7 +330,7 @@ func TestStdlibKindWrappedInGraph(t *testing.T) {
 	t.Parallel()
 	require.NoError(t, waitForCRD(ctx, k8sClient, "kinds.experimental.kro.run", stdlibCRDTimeout))
 
-	// Phase 1: Create an outer Graph that templates a Kind with $${...} expressions.
+	// Phase 1: Create an outer Graph that templates a Kind with ${${...}} expressions.
 	t.Log("creating outer Graph that stamps a Kind with deferred expressions")
 	graph := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "experimental.kro.run/v1alpha1",
@@ -358,7 +358,7 @@ func TestStdlibKindWrappedInGraph(t *testing.T) {
 									"message": "string | default=from-graph",
 								},
 								"status": map[string]any{
-									"configMapName": "$${cm.metadata.name}",
+									"configMapName": "${${cm.metadata.name}}",
 								},
 							},
 							"nodes": []any{
@@ -368,11 +368,11 @@ func TestStdlibKindWrappedInGraph(t *testing.T) {
 										"apiVersion": "v1",
 										"kind":       "ConfigMap",
 										"metadata": map[string]any{
-											"name":      "$${schema.metadata.name}-fromgraph",
-											"namespace": "$${schema.metadata.namespace}",
+											"name":      "${${schema.metadata.name}}-fromgraph",
+											"namespace": "${${schema.metadata.namespace}}",
 										},
 										"data": map[string]any{
-											"message": "$${schema.spec.message}",
+											"message": "${${schema.spec.message}}",
 										},
 									},
 								},

@@ -50,7 +50,7 @@ func TestInferFieldType(t *testing.T) {
 		{name: "embedded expression", value: "prefix-${spec.name}", wantType: "string"},
 		{name: "embedded expression suffix", value: "${spec.name}-suffix", wantType: "string"},
 		{name: "multi expression", value: "${a}-${b}", wantType: "string"},
-		{name: "deferred expression", value: "$${spec.name}", wantType: "string"},
+		{name: "deferred expression", value: "${${spec.name}}", wantType: "string"},
 
 		// Booleans
 		{name: "true", value: true, wantType: "bool"},
@@ -508,13 +508,13 @@ func TestForEachReturnTypeValidation(t *testing.T) {
 	})
 
 	t.Run("deferred expression skipped", func(t *testing.T) {
-		// A $${...} forEach is deferred to the child graph. The parent
+		// A ${${...}} forEach is deferred to the child graph. The parent
 		// compiler must not reject it.
 		spec := &graph.GraphSpec{Nodes: []graph.Node{
 			defNode("data", map[string]any{"items": []any{"a", "b"}}),
 			node(graph.Node{
 				ID:      "worker",
-				ForEach: &graph.ForEachBinding{VarName: "item", Expr: "$${data.items}"},
+				ForEach: &graph.ForEachBinding{VarName: "item", Expr: "${${data.items}}"},
 				Def:     map[string]any{"v": "literal"},
 			}, graph.NodeTypeDef),
 		}}
@@ -599,7 +599,7 @@ func TestInferStringType(t *testing.T) {
 		{"prefix-${x}", "string"},
 		{"${x}-suffix", "string"},
 		{"${x}-${y}", "string"},
-		{"$${x}", "string"},           // deferred expression
+		{"${${x}}", "string"},           // deferred expression
 		{"no dollars here", "string"}, // plain text
 	}
 	for _, tt := range tests {

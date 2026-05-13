@@ -59,12 +59,12 @@ func InferFieldType(path string, value any) *apiservercel.DeclType {
 //   - Standalone expression (${expr} is the entire string): dyn
 //   - Embedded expression (text around ${expr}): string (interpolation always produces string)
 func InferStringType(s string) *apiservercel.DeclType {
-	dollars, _, start, end := graph.FindExpr(s, 0)
+	_, expr, start, end := graph.FindExpr(s, 0)
 	if start < 0 {
 		// No expression — pure literal string.
 		return apiservercel.StringType
 	}
-	if start == 0 && end == len(s) && len(dollars) == 1 {
+	if start == 0 && end == len(s) && !graph.IsDeferred(expr) {
 		// Standalone expression — type unknown without compilation.
 		return apiservercel.DynType
 	}
