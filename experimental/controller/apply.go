@@ -328,14 +328,17 @@ func ssaWrite(ctx context.Context, c client.Client, obj *unstructured.Unstructur
 		}
 	}
 
-	// If the main payload only contains identity fields (apiVersion, kind, metadata),
-	// skip the main-object apply — it serves no purpose and would needlessly register
-	// a field manager on the main resource, causing ownership conflicts.
-	mainOnlyIdentity := true
-	for k := range mainPayload {
-		if k != "apiVersion" && k != "kind" && k != "metadata" {
-			mainOnlyIdentity = false
-			break
+	// If the main payload only contains identity fields (apiVersion, kind, metadata)
+	// AND we have status to write, skip the main-object apply — it serves no purpose
+	// and would needlessly register a field manager on the main resource, causing
+	// ownership conflicts.
+	mainOnlyIdentity := hasStatus && statusData != nil
+	if mainOnlyIdentity {
+		for k := range mainPayload {
+			if k != "apiVersion" && k != "kind" && k != "metadata" {
+				mainOnlyIdentity = false
+				break
+			}
 		}
 	}
 
