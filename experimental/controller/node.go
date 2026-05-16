@@ -226,6 +226,86 @@ func reconcileWatch(ctx context.Context, reader client.Reader, rs *reconcileScop
 	return readyErr
 }
 
+// seedObservedState pre-populates scope with the live object so that
+// self-referencing CEL expressions (e.g. status carry-forward) resolve
+// during template evaluation. Per 001-graph.md § Observed State.
+func (c *clusterAccess) seedObservedState(ctx context.Context, rs *reconcileScope, node graphpkg.Node, eval *evaluator) error {
+	logger := log.FromContext(ctx)
+
+	// TemplateExpr or dynamic GVK — can't determine target before full
+	// evaluation. Seed empty map so optional chaining provides defaults.
+	if node.HasDynamicGVR() {
+		eval.scope[node.ID] = map[string]any{}
+		return nil
+	}
+	gvk := graphpkg.GVKFromMap(node.Identity())
+
+	// Extract and evaluate name/namespace from raw identity.
+	identity := node.Identity()
+	var name, namespace string
+	if md, ok := identity["metadata"].(map[string]any); ok {
+		if n, ok := md["name"].(string); ok {
+			if graphpkg.IsCELExpression(n) {
+				result, err := eval.evalString(n)
+				if err != nil {
+					if isPending(err) {
+						return fmt.Errorf("observed state: %w", ErrPending)
+					}
+					return fmt.Errorf("observed state name: %w", err)
+				}
+				s, ok := result.(string)
+				if !ok {
+					return fmt.Errorf("observed state: name expression produced %T, want string", result)
+				}
+				name = s
+			} else {
+				name = n
+			}
+		}
+		if ns, ok := md["namespace"].(string); ok {
+			if graphpkg.IsCELExpression(ns) {
+				result, err := eval.evalString(ns)
+				if err != nil {
+					if isPending(err) {
+						return fmt.Errorf("observed state: %w", ErrPending)
+					}
+					return fmt.Errorf("observed state namespace: %w", err)
+				}
+				s, ok := result.(string)
+				if !ok {
+					return fmt.Errorf("observed state: namespace expression produced %T, want string", result)
+				}
+				namespace = s
+			} else {
+				namespace = ns
+			}
+		}
+	}
+
+	// If name is empty after evaluation, we can't GET — seed empty.
+	if name == "" {
+		eval.scope[node.ID] = map[string]any{}
+		return nil
+	}
+
+	// Resolve namespace using the same logic as apply.
+	namespace = defaultNamespace(gvk, namespace, rs.namespace, c.scope)
+
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(gvk)
+	if err := c.reader.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, obj); err != nil {
+		if apierrors.IsNotFound(err) {
+			eval.scope[node.ID] = map[string]any{}
+			return nil
+		}
+		return fmt.Errorf("observed state GET %s %s/%s: %w", gvk, namespace, name, err)
+	}
+
+	eval.scope[node.ID] = graphpkg.NormalizeTypes(obj.Object)
+	logger.V(1).Info("seeded observed state", "node", node.ID, "gvk", gvk, "name", name, "namespace", namespace)
+	return nil
+}
+
 // reconcileApply evaluates and applies a Template or Patch node.
 // The node type controls SSA behavior (identity labels, pre-apply
 // checks) and cleanup semantics: Template resources are deleted on prune,
@@ -235,6 +315,12 @@ func (c *clusterAccess) reconcileApply(ctx context.Context, rs *reconcileScope, 
 	logger := log.FromContext(ctx)
 
 	nodeType := node.Type()
+
+	// Seed observed state before template evaluation. Per 001-graph.md § Observed State:
+	// the scope entry is the pre-apply live object (or empty map on first create).
+	if err := c.seedObservedState(ctx, rs, node, eval); err != nil {
+		return Applied{}, fmt.Errorf("%s %s: %w", nodeType, node.ID, err)
+	}
 
 	evalMap, err := eval.toMapNode(node)
 	if err != nil {
