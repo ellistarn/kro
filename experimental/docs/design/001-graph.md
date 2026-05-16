@@ -356,11 +356,12 @@ It's common to combine `finalizes` with `readyWhen` to coordinate graceful remov
 
 ## Observed State
 
-Every node's scope entry is its observed state. Before evaluating a node's expressions, kro GETs the
-target resource from the API server. The result — the full live object including `metadata` and
-`status` — enters scope under the node's `id`. When the resource does not yet exist (first create),
-the scope entry is an empty map — the entry exists but has no fields, so expressions use optional
-chaining (`.?`, `.orValue()`) to provide defaults.
+Before evaluating a node's expressions, kro GETs the target resource from the API server. The
+result — the full live object including `metadata` and `status` — enters scope under the node's
+`id`. This is the observed state: what exists before the node acts. When the resource does not yet
+exist (first create), the scope entry is an empty map — expressions use optional chaining (`.?`,
+`.orValue()`) to provide defaults. After apply, the response replaces the scope entry — downstream
+nodes see the post-apply state, not the pre-apply observation.
 
 Self-reference follows naturally: a node can reference its own `id` in its expressions to read its
 observed state. `deployment.metadata.generation` in the `deployment` node's template reads the live
@@ -403,7 +404,9 @@ that generation.
 On first create (GET 404), `myapp` is an empty map. Optional chaining resolves: `availableReplicas`
 defaults to `0`, `generation` to `0`, `conditions` to `[]`. The condition gets `time.now()` as its
 initial timestamp. On subsequent reconciles, the GET succeeds and self-reference reads the live
-object.
+object. A non-404 GET failure (5xx, network timeout) is a transient error — the node becomes
+SystemError and retries with backoff. The controller does not evaluate the template when observed
+state is unknown.
 
 **Decorator — ref + patch:**
 
@@ -447,9 +450,10 @@ object.
       ]}
 ```
 
-Same mechanics — `webapp.metadata.generation` is the generation of the object being patched.
-`webapp.status.conditions` is its existing conditions from the GET. The patch writes back to the
-same resource the ref observed.
+The ref provides observed state of the target resource. The patch reads generation and conditions
+through `webapp` — the ref's scope entry — rather than through self-reference (`webappStatus`),
+because the ref already GETs the same resource. Both paths yield identical data; the ref decouples
+the read (observation) from the write (patch), making the dependency graph explicit.
 
 **`.condition()` sugar:** `.condition(type, status, reason, message)` is a convenience function that
 encapsulates the pattern above — find existing condition by type, preserve `lastTransitionTime` when
@@ -721,10 +725,6 @@ The ownerReference triggers self-deletion. The patch holds the owner until teard
 releases the finalizer, the owner completes deletion.
 
 ## Why Not
-
-**`observed` as a user-visible scope variable.** The scope entry _is_ the observed state — every
-node GETs its target before evaluation. Adding a parallel variable duplicates data under a different
-name.
 
 **`immutable()` as a CEL function.** Write constraints (preventing field mutation after creation)
 are a policy concern, not a value expression. CEL expressions produce values; they do not constrain
