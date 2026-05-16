@@ -67,23 +67,23 @@ spec:
             # Watch the kind specified by the Decorator.
             - id: items
               watch:
-                apiVersion: $${decorator.spec.watch.apiVersion}
-                kind: $${decorator.spec.watch.kind}
-                selector: $${decorator.spec.watch.selector}
+                apiVersion: ${${decorator.spec.watch.apiVersion}}
+                kind: ${${decorator.spec.watch.kind}}
+                selector: ${${decorator.spec.watch.selector}}
 
             # For each item, create a sub-Graph with an auto-prepended
             # Watch node ("item") plus the user's nodes.
             - id: instances
               forEach:
-                - item: $${items}
+                - item: ${${items}}
               template:
                 apiVersion: experimental.kro.run/v1alpha1
                 kind: Graph
                 metadata:
-                  name: $${decorator.metadata.namespace + "-" + decorator.metadata.name + "-" + item.metadata.namespace + "-" + item.metadata.name}
+                  name: ${${decorator.metadata.namespace + "-" + decorator.metadata.name + "-" + item.metadata.namespace + "-" + item.metadata.name}}
                 spec:
                   nodes: >-
-                    $${
+                    ${${
                       [{"id": "item", "ref": {
                         "apiVersion": decorator.spec.watch.apiVersion,
                         "kind": decorator.spec.watch.kind,
@@ -93,7 +93,7 @@ spec:
                         }
                       }}]
                       + decorator.spec.nodes
-                    }
+                    }}
 
             # Reflect the count of matched items onto the Decorator instance.
             - id: decoratorStatus
@@ -101,7 +101,7 @@ spec:
                 apiVersion: experimental.kro.run/v1alpha1
                 kind: Decorator
                 metadata:
-                  name: $${decorator.metadata.name}
-                  namespace: $${decorator.metadata.namespace}
+                  name: ${${decorator.metadata.name}}
+                  namespace: ${${decorator.metadata.namespace}}
                 status:
-                  items: $${items.size()}
+                  items: ${${items.size()}}

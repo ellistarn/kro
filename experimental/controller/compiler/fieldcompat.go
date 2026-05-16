@@ -51,8 +51,8 @@ func checkFieldCompat(nodeID string, body map[string]any, s *spec.Schema, exprTy
 
 		switch v := value.(type) {
 		case string:
-			dollars, expr, start, end := graph.FindExpr(v, 0)
-			if start < 0 || start != 0 || end != len(v) || len(dollars) != 1 {
+			_, expr, start, end := graph.FindExpr(v, 0)
+			if start < 0 || start != 0 || end != len(v) || graph.IsDeferred(expr) {
 				continue // not a standalone expression
 			}
 			ct, ok := exprTypes[expr]

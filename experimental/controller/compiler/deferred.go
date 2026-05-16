@@ -1,11 +1,11 @@
-// deferred.go validates deferred ($${...}) expressions at compile time.
+// deferred.go validates deferred (nested ${${...}}) expressions at compile time.
 // When a node's template produces a child Graph CR, the compiler extracts
 // the child's scope (node IDs + forEach variables) and validates deferred
 // expressions against it. Parse errors and undeclared references are caught
 // at the parent's compile time instead of deferring to the child controller.
 //
 // Per 004-compilation.md § Recursive Compilation: "The compiler handles
-// arbitrary depth by recursing. $${expr} is depth 1... The mechanism is
+// arbitrary depth by recursing. Nested ${${expr}} is depth 1... The mechanism is
 // general; the current patterns are not."
 package compiler
 
@@ -30,8 +30,8 @@ type deferredExpr struct {
 	inner string // expression text after stripping one $ (ready for child compilation)
 }
 
-// compileDeferredExpressions validates $${...} expressions at each deferral
-// depth by building best-effort child type environments. Called during
+// compileDeferredExpressions validates nested ${${...}} expressions at each
+// deferral depth by building best-effort child type environments. Called during
 // CompileGraphSpec after ${...} expression compilation.
 //
 // When a node's template produces a child Graph CR with a statically-knowable
@@ -40,13 +40,13 @@ type deferredExpr struct {
 // compilation errors.
 func compileDeferredExpressions(spec *graph.GraphSpec) error {
 	for _, node := range spec.Nodes {
-		// Walk the node's body for $${...} expressions.
+		// Walk the node's body for deferred expressions (${...} containing inner ${}).
 		body := node.Body()
 		if body == nil && node.TemplateExpr == "" {
 			continue
 		}
 
-		// Collect all $${...} expressions from the node's body.
+		// Collect all deferred expressions from the node's body.
 		var deferred []deferredExpr
 		var allStrings []string
 		if body != nil {
@@ -58,12 +58,13 @@ func compileDeferredExpressions(spec *graph.GraphSpec) error {
 		for _, s := range allStrings {
 			pos := 0
 			for {
-				dollars, expr, start, _ := graph.FindExpr(s, pos)
+				_, expr, start, end := graph.FindExpr(s, pos)
 				if start < 0 {
 					break
 				}
-				pos = start + len(dollars) + len(expr) + 2
-				if len(dollars) == 2 { // $${...} — depth 1
+				pos = end
+				if graph.IsDeferred(expr) {
+					// This is a deferral wrapper — inner expressions are the child's CEL
 					deferred = append(deferred, deferredExpr{inner: expr})
 				}
 			}
@@ -174,7 +175,7 @@ func extractForEachVarNames(forEach any) []string {
 }
 
 // validateDeferredExprs builds a child CEL environment from the child scope
-// and parses + type-checks each deferred expression against it.
+// and parses + type-checks each deferred expression's inner CEL expressions against it.
 func validateDeferredExprs(parentNodeID string, scope ChildScope, exprs []deferredExpr) error {
 	// Build a minimal CEL environment with child identifiers as dyn.
 	allIDs := append(scope.NodeIDs, scope.ForEachVars...)
@@ -190,23 +191,36 @@ func validateDeferredExprs(parentNodeID string, scope ChildScope, exprs []deferr
 		return fmt.Errorf("node %q: creating child CEL env for deferred analysis: %w", parentNodeID, err)
 	}
 
-	// Parse and type-check each deferred expression.
+	// Parse and type-check the inner CEL expressions within each deferred body.
 	seen := make(map[string]bool)
 	for _, d := range exprs {
-		if seen[d.inner] {
-			continue // same expression, already validated
-		}
-		seen[d.inner] = true
+		// The inner field is the body of the outer ${}, which contains ${...} patterns.
+		// Extract the leaf CEL expressions from within.
+		pos := 0
+		for {
+			_, innerExpr, start, end := graph.FindExpr(d.inner, pos)
+			if start < 0 {
+				break
+			}
+			pos = end
+			if graph.IsDeferred(innerExpr) {
+				continue // deeper nesting — skip at this level
+			}
+			if seen[innerExpr] {
+				continue
+			}
+			seen[innerExpr] = true
 
-		parsed, issues := env.Parse(d.inner)
-		if issues != nil && issues.Err() != nil {
-			return fmt.Errorf("node %q: deferred depth 1: parsing expression %q: %w: %w",
-				parentNodeID, d.inner, ErrInvalidExpression, issues.Err())
-		}
-		_, issues = env.Check(parsed)
-		if issues != nil && issues.Err() != nil {
-			return fmt.Errorf("node %q: deferred depth 1: checking expression %q: %w: %w",
-				parentNodeID, d.inner, ErrInvalidExpression, issues.Err())
+			parsed, issues := env.Parse(innerExpr)
+			if issues != nil && issues.Err() != nil {
+				return fmt.Errorf("node %q: deferred depth 1: parsing expression %q: %w: %w",
+					parentNodeID, innerExpr, ErrInvalidExpression, issues.Err())
+			}
+			_, issues = env.Check(parsed)
+			if issues != nil && issues.Err() != nil {
+				return fmt.Errorf("node %q: deferred depth 1: checking expression %q: %w: %w",
+					parentNodeID, innerExpr, ErrInvalidExpression, issues.Err())
+			}
 		}
 	}
 	return nil
@@ -217,13 +231,12 @@ func validateDeferredExprs(parentNodeID string, scope ChildScope, exprs []deferr
 // ---------------------------------------------------------------------------
 
 // precompileChildGraph extracts a child GraphSpec from a parent template body
-// that produces a Graph CR, strips one deferral level ($${...} → ${...}),
+// that produces a Graph CR, strips one deferral level (nested ${${...}} → ${...}),
 // parses the child's node list, and runs CompileGraphSpec on the child spec.
 // Compilation errors in the child are reported as parent compilation errors.
 //
 // Per 004-compilation.md § Pre-compilation: "The parent extracts the child spec
-// (with $${...} → ${...} stripping), runs CompileGraphSpec on it for
-// validation only."
+// (with deferral stripping), runs CompileGraphSpec on it for validation only."
 func precompileChildGraph(parentNodeID string, body map[string]any) error {
 	specMap, ok := body["spec"].(map[string]any)
 	if !ok {
@@ -239,7 +252,7 @@ func precompileChildGraph(parentNodeID string, body map[string]any) error {
 		return nil
 	}
 
-	// Strip one deferral level: $${...} → ${...} throughout the node list.
+	// Strip one deferral level: ${${...}} → ${...} throughout the node list.
 	stripped := StripDeferralLevel(nodesList).([]any)
 
 	// Parse the stripped node list into Node structs.
@@ -264,13 +277,15 @@ func precompileChildGraph(parentNodeID string, body map[string]any) error {
 // Dollar-stripping utilities for pre-compilation
 // ---------------------------------------------------------------------------
 
-// stripDeferralLevel walks a value tree and strips one $ from every $${...}
-// pattern in string values. Used to produce the child Graph's spec from the
-// parent's template: $${expr} → ${expr}, $$${expr} → $${expr}, ${expr} → ${expr} (unchanged).
+// StripDeferralLevel walks a value tree and strips one nesting layer from
+// deferred expressions in string values. Used to produce the child Graph's
+// spec from the parent's template:
+//   - ${${child.expr}} → ${child.expr} (deferred: strip outer wrapper)
+//   - ${parent.expr} → __kro_parent_expr__ (not deferred: parent-scope placeholder)
 func StripDeferralLevel(v any) any {
 	switch val := v.(type) {
 	case string:
-		return stripOneDollar(val)
+		return stripOneNestingLayer(val)
 	case map[string]any:
 		result := make(map[string]any, len(val))
 		for k, inner := range val {
@@ -288,27 +303,27 @@ func StripDeferralLevel(v any) any {
 	}
 }
 
-// stripOneDollar strips one $ from each $${...} in a string.
-// ${...} (single $) is replaced with a placeholder literal — these are
-// parent-scope expressions that will be evaluated at reconcile time before
-// the child is stamped. Pre-compilation should not attempt to compile them.
-func stripOneDollar(s string) string {
+// stripOneNestingLayer processes a string, stripping one nesting layer from
+// deferred expressions and replacing parent-scope expressions with placeholders.
+//   - ${${child.a}} → ${child.a} (deferred: output the body)
+//   - ${parent.b} → __kro_parent_expr__ (not deferred: placeholder)
+func stripOneNestingLayer(s string) string {
 	var result strings.Builder
 	pos := 0
 	changed := false
 	for pos < len(s) {
-		dollars, expr, start, end := graph.FindExpr(s, pos)
+		_, expr, start, end := graph.FindExpr(s, pos)
 		if start < 0 {
 			result.WriteString(s[pos:])
 			break
 		}
 		result.WriteString(s[pos:start])
-		if len(dollars) > 1 {
-			// $${...} → ${...}, $$${...} → $${...}
-			result.WriteString(dollars[1:] + "{" + expr + "}")
+		if graph.IsDeferred(expr) {
+			// Deferred: strip outer ${} wrapper, output body (which contains inner ${})
+			result.WriteString(expr)
 			changed = true
 		} else {
-			// ${...} is a parent expression — replace with placeholder.
+			// Parent-scope expression — replace with placeholder.
 			// At reconcile time this will be a concrete value.
 			result.WriteString("__kro_parent_expr__")
 			changed = true

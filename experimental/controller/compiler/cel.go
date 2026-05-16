@@ -546,8 +546,8 @@ func compileForEachReadyWhen(
 		// Re-check readyWhen expressions against the inner env.
 		for _, rwExpr := range node.ReadyWhen {
 			// Extract inner expression from ${...}
-			dollars, expr, start, end := graph.FindExpr(rwExpr, 0)
-			if start < 0 || len(dollars) != 1 || start != 0 || end != len(rwExpr) {
+			_, expr, start, end := graph.FindExpr(rwExpr, 0)
+			if start < 0 || graph.IsDeferred(expr) || start != 0 || end != len(rwExpr) {
 				continue
 			}
 			parsed, issues := innerEnv.Parse(expr)
@@ -573,14 +573,14 @@ func validateForEachCollections(nodes []graph.Node, exprTypes map[string]*cel.Ty
 		if node.ForEach == nil {
 			continue
 		}
-		dollars, innerExpr, start, end := graph.FindExpr(node.ForEach.Expr, 0)
+		_, innerExpr, start, end := graph.FindExpr(node.ForEach.Expr, 0)
 		if start < 0 {
 			// No ${...} expression at all — a literal string is never iterable.
 			return fmt.Errorf("node %q: forEach expression %q must contain a ${...} expression: %w",
 				node.ID, node.ForEach.Expr, ErrInvalidExpression)
 		}
-		if len(dollars) != 1 {
-			continue // deferred ($${...}) — validated by child compiler
+		if graph.IsDeferred(innerExpr) {
+			continue // deferred — validated by child compiler
 		}
 		// The entire string must be ${expr}, not an interpolation like
 		// "prefix-${expr}-suffix". Interpolation always produces a string,

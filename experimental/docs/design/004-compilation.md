@@ -125,16 +125,17 @@ if one exists.
 ## Recursive Compilation
 
 When a Graph stamps child Graphs (via forEach), the child's expressions are invisible to the
-parent's compiler -- they arrive as deferred `$${...}` strings or as rendered output. The child
-controller discovers errors only when it compiles the child Graph, which may be arbitrarily later.
+parent's compiler -- they arrive as deferred nested expressions (a `${...}` whose body contains
+inner `${...}` patterns) or as rendered output. The child controller discovers errors only when it
+compiles the child Graph, which may be arbitrarily later.
 
 The compiler closes this gap through two mechanisms.
 
 **Deferred expression analysis.** After compiling `${...}` expressions, the compiler scans for
-`$${...}` patterns. For each, it strips one `$`, builds a best-effort type environment from the
-child scope (node IDs from the child's node list, typed permissively), and type-checks the inner
-expression. Errors are reported on the parent Graph. The compiler handles arbitrary deferral depth
-by recursing.
+nested expressions. For each, it strips the outer `${}` wrapper, builds a best-effort type
+environment from the child scope (node IDs from the child's node list, typed permissively), and
+type-checks the inner expression. Errors are reported on the parent Graph. The compiler handles
+arbitrary deferral depth by recursing.
 
 The child scope is extracted from the template when statically knowable: literal node lists are
 fully extractable, expression-valued node lists are partially or not at all. The compiler works with
@@ -142,8 +143,8 @@ what it has -- partial scopes catch errors in known references, unknown referenc
 permissively.
 
 **Pre-compilation.** When a forEach template produces a child Graph CR (literal apiVersion/kind
-identifying a Graph), the compiler extracts the child spec, strips one deferral level (`$${...}` to
-`${...}`), and runs the full pipeline. This catches expression errors, type errors, and DAG cycles
+identifying a Graph), the compiler extracts the child spec, strips one deferral level (unwraps the
+outer `${}`, so `${${child.expr}}` becomes `${child.expr}`), and runs the full pipeline. This catches expression errors, type errors, and DAG cycles
 at the parent's compile time -- before any child Graph CR exists. On spec mutation, the parent
 recompiles and pre-compiles the new child spec, catching errors in the updated template before
 children are re-created.

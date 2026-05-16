@@ -17,7 +17,7 @@ import (
 
 func TestDeferredExpressionAnalysis(t *testing.T) {
 	t.Run("valid deferred expression in Graph CR template", func(t *testing.T) {
-		// A forEach node producing a Graph CR with $${...} expressions
+		// A forEach node producing a Graph CR with ${${...}} expressions
 		// referencing child node IDs. Should compile successfully.
 		spec := &graph.GraphSpec{Nodes: []graph.Node{
 			watchNode("items", map[string]any{
@@ -38,7 +38,7 @@ func TestDeferredExpressionAnalysis(t *testing.T) {
 								"ref": map[string]any{
 									"apiVersion": "v1",
 									"kind":       "ConfigMap",
-									"metadata":   map[string]any{"name": "$${schema.metadata.name}"},
+									"metadata":   map[string]any{"name": "${${schema.metadata.name}}"},
 								},
 							},
 							map[string]any{
@@ -46,7 +46,7 @@ func TestDeferredExpressionAnalysis(t *testing.T) {
 								"template": map[string]any{
 									"apiVersion": "apps/v1",
 									"kind":       "Deployment",
-									"metadata":   map[string]any{"name": "$${schema.spec.name}"},
+									"metadata":   map[string]any{"name": "${${schema.spec.name}}"},
 								},
 							},
 						},
@@ -59,7 +59,7 @@ func TestDeferredExpressionAnalysis(t *testing.T) {
 	})
 
 	t.Run("syntax error in deferred expression", func(t *testing.T) {
-		// A $${...} expression with invalid CEL syntax should fail
+		// A ${${...}} expression with invalid CEL syntax should fail
 		// at the parent's compile time.
 		spec := &graph.GraphSpec{Nodes: []graph.Node{
 			watchNode("items", map[string]any{
@@ -80,7 +80,7 @@ func TestDeferredExpressionAnalysis(t *testing.T) {
 								"ref": map[string]any{
 									"apiVersion": "v1",
 									"kind":       "ConfigMap",
-									"metadata":   map[string]any{"name": "$${+++ bad syntax}"},
+									"metadata":   map[string]any{"name": "${${+++ bad syntax}}"},
 								},
 							},
 						},
@@ -96,7 +96,7 @@ func TestDeferredExpressionAnalysis(t *testing.T) {
 	})
 
 	t.Run("undeclared reference in deferred expression with known scope", func(t *testing.T) {
-		// A $${...} expression referencing a node ID that doesn't exist
+		// A ${${...}} expression referencing a node ID that doesn't exist
 		// in the child Graph's scope should fail when the scope is known.
 		spec := &graph.GraphSpec{Nodes: []graph.Node{
 			watchNode("items", map[string]any{
@@ -117,7 +117,7 @@ func TestDeferredExpressionAnalysis(t *testing.T) {
 								"ref": map[string]any{
 									"apiVersion": "v1",
 									"kind":       "ConfigMap",
-									"metadata":   map[string]any{"name": "$${nonexistent.metadata.name}"},
+									"metadata":   map[string]any{"name": "${${nonexistent.metadata.name}}"},
 								},
 							},
 						},
@@ -157,11 +157,11 @@ func TestDeferredExpressionAnalysis(t *testing.T) {
 							},
 							map[string]any{
 								"id":      "workers",
-								"forEach": []any{map[string]any{"w": "$${source}"}},
+								"forEach": []any{map[string]any{"w": "${${source}}"}},
 								"template": map[string]any{
 									"apiVersion": "v1",
 									"kind":       "ConfigMap",
-									"metadata":   map[string]any{"name": "$${w.metadata.name}"},
+									"metadata":   map[string]any{"name": "${${w.metadata.name}}"},
 								},
 							},
 						},
@@ -174,7 +174,7 @@ func TestDeferredExpressionAnalysis(t *testing.T) {
 	})
 
 	t.Run("non-Graph-CR template with deferred expressions skips scope check", func(t *testing.T) {
-		// $${...} in a non-Graph-CR template has no extractable child
+		// ${${...}} in a non-Graph-CR template has no extractable child
 		// scope. Validation uses an empty scope — only custom functions
 		// are available. An expression using plural() should pass.
 		spec := &graph.GraphSpec{Nodes: []graph.Node{
@@ -184,7 +184,7 @@ func TestDeferredExpressionAnalysis(t *testing.T) {
 				Template: map[string]any{
 					"apiVersion": "v1",
 					"kind":       "ConfigMap",
-					"data":       map[string]any{"plural": "$${plural('Widget')}"},
+					"data":       map[string]any{"plural": "${${plural('Widget')}}"},
 				},
 			}, graph.NodeTypeTemplate),
 		}}
@@ -193,7 +193,7 @@ func TestDeferredExpressionAnalysis(t *testing.T) {
 	})
 
 	t.Run("deferred expression with custom function plural", func(t *testing.T) {
-		// $${plural(k.spec.schema.kind)} should compile — k is a child node ID,
+		// ${${plural(k.spec.schema.kind)}} should compile — k is a child node ID,
 		// plural() is a custom function available in the child scope.
 		spec := &graph.GraphSpec{Nodes: []graph.Node{
 			watchNode("items", map[string]any{
@@ -222,7 +222,7 @@ func TestDeferredExpressionAnalysis(t *testing.T) {
 								"template": map[string]any{
 									"apiVersion": "v1",
 									"kind":       "ConfigMap",
-									"metadata":   map[string]any{"name": "$${plural(k.spec.schema.kind).lowerAscii()}"},
+									"metadata":   map[string]any{"name": "${${plural(k.spec.schema.kind).lowerAscii()}}"},
 								},
 							},
 						},
@@ -262,7 +262,7 @@ func TestPreCompileChildGraph(t *testing.T) {
 								"ref": map[string]any{
 									"apiVersion": "v1",
 									"kind":       "ConfigMap",
-									"metadata":   map[string]any{"name": "$${schema.metadata.name}"},
+									"metadata":   map[string]any{"name": "${${schema.metadata.name}}"},
 								},
 							},
 							map[string]any{
@@ -270,9 +270,9 @@ func TestPreCompileChildGraph(t *testing.T) {
 								"template": map[string]any{
 									"apiVersion": "apps/v1",
 									"kind":       "Deployment",
-									"metadata":   map[string]any{"name": "$${schema.spec.appName}"},
+									"metadata":   map[string]any{"name": "${${schema.spec.appName}}"},
 								},
-								"readyWhen": []any{"$${deploy.status.ready == true}"},
+								"readyWhen": []any{"${${deploy.status.ready == true}}"},
 							},
 						},
 					},
@@ -305,7 +305,7 @@ func TestPreCompileChildGraph(t *testing.T) {
 								"template": map[string]any{
 									"apiVersion": "v1",
 									"kind":       "ConfigMap",
-									"data":       map[string]any{"val": "$${b.spec.value}"},
+									"data":       map[string]any{"val": "${${b.spec.value}}"},
 								},
 							},
 							map[string]any{
@@ -313,7 +313,7 @@ func TestPreCompileChildGraph(t *testing.T) {
 								"template": map[string]any{
 									"apiVersion": "v1",
 									"kind":       "ConfigMap",
-									"data":       map[string]any{"val": "$${a.spec.value}"},
+									"data":       map[string]any{"val": "${${a.spec.value}}"},
 								},
 							},
 						},
@@ -350,7 +350,7 @@ func TestPreCompileChildGraph(t *testing.T) {
 								"template": map[string]any{
 									"apiVersion": "v1",
 									"kind":       "ConfigMap",
-									"data":       map[string]any{"val": "$${!!! parse error}"},
+									"data":       map[string]any{"val": "${${!!! parse error}}"},
 								},
 							},
 						},
@@ -370,36 +370,36 @@ func TestPreCompileChildGraph(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestStripDeferralLevel(t *testing.T) {
-	t.Run("strips one dollar from deferred", func(t *testing.T) {
-		got := compiler.StripDeferralLevel("$${expr}")
+	t.Run("strips one nesting layer from deferred", func(t *testing.T) {
+		got := compiler.StripDeferralLevel("${${expr}}")
 		assert.Equal(t, "${expr}", got)
 	})
 
-	t.Run("preserves single dollar", func(t *testing.T) {
+	t.Run("replaces parent-scope with placeholder", func(t *testing.T) {
 		got := compiler.StripDeferralLevel("${expr}")
 		assert.Equal(t, "__kro_parent_expr__", got)
 	})
 
-	t.Run("strips one dollar from triple", func(t *testing.T) {
-		got := compiler.StripDeferralLevel("$$${expr}")
-		assert.Equal(t, "$${expr}", got)
+	t.Run("strips one nesting layer from double-nested", func(t *testing.T) {
+		got := compiler.StripDeferralLevel("${${${grandchild}}}")
+		assert.Equal(t, "${${grandchild}}", got)
 	})
 
-	t.Run("handles embedded expressions", func(t *testing.T) {
-		got := compiler.StripDeferralLevel("prefix-$${a}-$${b}-suffix")
+	t.Run("handles embedded deferred expressions", func(t *testing.T) {
+		got := compiler.StripDeferralLevel("prefix-${${a}}-${${b}}-suffix")
 		assert.Equal(t, "prefix-${a}-${b}-suffix", got)
 	})
 
 	t.Run("handles mixed depth", func(t *testing.T) {
-		got := compiler.StripDeferralLevel("${parent}-$${child}")
+		got := compiler.StripDeferralLevel("${parent}-${${child}}")
 		assert.Equal(t, "__kro_parent_expr__-${child}", got)
 	})
 
 	t.Run("recurses into maps", func(t *testing.T) {
 		input := map[string]any{
-			"name": "$${k.spec.schema.kind}",
+			"name": "${${k.spec.schema.kind}}",
 			"nested": map[string]any{
-				"value": "$${k.spec.schema.apiVersion}",
+				"value": "${${k.spec.schema.apiVersion}}",
 			},
 		}
 		got := compiler.StripDeferralLevel(input).(map[string]any)
@@ -409,7 +409,7 @@ func TestStripDeferralLevel(t *testing.T) {
 	})
 
 	t.Run("recurses into lists", func(t *testing.T) {
-		input := []any{"$${a}", "$${b}"}
+		input := []any{"${${a}}", "${${b}}"}
 		got := compiler.StripDeferralLevel(input).([]any)
 		assert.Equal(t, "${a}", got[0])
 		assert.Equal(t, "${b}", got[1])
@@ -456,7 +456,7 @@ func TestExtractChildScope(t *testing.T) {
 					map[string]any{"id": "source", "watch": map[string]any{}},
 					map[string]any{
 						"id":       "workers",
-						"forEach":  []any{map[string]any{"w": "$${source}"}},
+						"forEach":  []any{map[string]any{"w": "${${source}}"}},
 						"template": map[string]any{},
 					},
 				},
@@ -482,7 +482,7 @@ func TestExtractChildScope(t *testing.T) {
 			"apiVersion": "experimental.kro.run/v1alpha1",
 			"kind":       "Graph",
 			"spec": map[string]any{
-				"nodes": "$${[...] + k.spec.nodes}",
+				"nodes": "${${[...] + k.spec.nodes}}",
 			},
 		}
 		scope := compiler.ExtractChildScopeFromBody(body)

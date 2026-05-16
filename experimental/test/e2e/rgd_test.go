@@ -70,19 +70,19 @@ func TestRGDPatternEndToEnd(t *testing.T) {
 										},
 									},
 									// L2: Create a ConfigMap from the instance spec
-									// $${} deferred to L2 evaluation
+									// ${${}} deferred to L2 evaluation
 									map[string]any{
 										"id": "config",
 										"template": map[string]any{
 											"apiVersion": "v1",
 											"kind":       "ConfigMap",
 											"metadata": map[string]any{
-												"name": "$${schema.metadata.name}-config",
+												"name": "${${schema.metadata.name}}-config",
 											},
 											"data": map[string]any{
-												"image":    "$${schema.spec.image}",
-												"replicas": "$${string(schema.spec.replicas)}",
-												"appName":  "$${schema.metadata.name}",
+												"image":    "${${schema.spec.image}}",
+												"replicas": "${${string(schema.spec.replicas)}}",
+												"appName":  "${${schema.metadata.name}}",
 											},
 										},
 									},
@@ -95,15 +95,15 @@ func TestRGDPatternEndToEnd(t *testing.T) {
 											"apiVersion": "test.kro.run/v1alpha1",
 											"kind":       "SimpleApp",
 											"metadata": map[string]any{
-												"name":      "$${schema.metadata.name}",
-												"namespace": "$${schema.metadata.namespace}",
+												"name":      "${${schema.metadata.name}}",
+												"namespace": "${${schema.metadata.namespace}}",
 												"annotations": map[string]any{
 													"kro.run/managed-by": "graph-controller",
 												},
 											},
 											"status": map[string]any{
-												"configName": "$${config.metadata.name}",
-												"image":      "$${config.data.image}",
+												"configName": "${${config.metadata.name}}",
+												"image":      "${${config.data.image}}",
 											},
 										},
 									},
@@ -312,7 +312,7 @@ func TestDynamicResourceListViaCEL(t *testing.T) {
 								// the PARENT evaluates. It constructs the child's node
 								// list dynamically. CEL output is opaque data — strings
 								// inside (like ${source.data.message}) survive to the child
-								// without needing $${} escaping.
+								// without needing ${${}} escaping.
 								"nodes": `${[
 								{"id": "source", "template": {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "dynamic-source"}}},
 								{"id": "result", "template": {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": item + "-result"}, "data": {"value": "${source.data.message}"}}}

@@ -21,7 +21,7 @@
 #
 # Escaping depth by target level (from L0 source):
 #   ${...}      — L0 evaluates (e.g. forEach variable, baked-in names)
-#   $${...}     — L1 evaluates (e.g. RGD schema fields, CEL list append)
+#   ${${...}}     — L1 evaluates (e.g. RGD schema fields, CEL list append)
 # ---------------------------------------------------------------------------
 apiVersion: experimental.kro.run/v1alpha1
 kind: Graph
@@ -146,35 +146,35 @@ spec:
                   name: ${rgd.metadata.name}
 
             # Create the CRD from the RGD schema.
-            # $${...} defers to L1, which evaluates against its own "rgd".
+            # ${${...}} defers to L1, which evaluates against its own "rgd".
             - id: crd
               template:
                 apiVersion: apiextensions.k8s.io/v1
                 kind: CustomResourceDefinition
                 metadata:
-                  name: $${plural(rgd.spec.schema.kind).lowerAscii()}.$${rgd.spec.schema.group}
-                  labels: '$${has(rgd.spec.schema.metadata) && has(rgd.spec.schema.metadata.labels) ? rgd.spec.schema.metadata.labels : {}}'
-                  annotations: '$${has(rgd.spec.schema.metadata) && has(rgd.spec.schema.metadata.annotations) ? rgd.spec.schema.metadata.annotations : {}}'
+                  name: ${${plural(rgd.spec.schema.kind).lowerAscii()}}.${${rgd.spec.schema.group}}
+                  labels: '${${has(rgd.spec.schema.metadata) && has(rgd.spec.schema.metadata.labels) ? rgd.spec.schema.metadata.labels : {}}}'
+                  annotations: '${${has(rgd.spec.schema.metadata) && has(rgd.spec.schema.metadata.annotations) ? rgd.spec.schema.metadata.annotations : {}}}'
                 spec:
-                  group: $${rgd.spec.schema.group}
+                  group: ${${rgd.spec.schema.group}}
                   names:
-                    kind: $${rgd.spec.schema.kind}
-                    plural: $${plural(rgd.spec.schema.kind).lowerAscii()}
-                  scope: $${rgd.spec.schema.scope}
+                    kind: ${${rgd.spec.schema.kind}}
+                    plural: ${${plural(rgd.spec.schema.kind).lowerAscii()}}
+                  scope: ${${rgd.spec.schema.scope}}
                   versions:
-                    - name: $${rgd.spec.schema.apiVersion}
+                    - name: ${${rgd.spec.schema.apiVersion}}
                       served: true
                       storage: true
                       subresources:
                         status: {}
                       schema:
-                        openAPIV3Schema: $${simpleSchema.toOpenAPI(rgd.spec.schema, rgd.spec.resources)}
+                        openAPIV3Schema: ${${simpleSchema.toOpenAPI(rgd.spec.schema, rgd.spec.resources)}}
 
             # Watch all instances of the kind
             - id: watchInstances
               watch:
-                apiVersion: $${rgd.spec.schema.group}/$${rgd.spec.schema.apiVersion}
-                kind: $${rgd.spec.schema.kind}
+                apiVersion: ${${rgd.spec.schema.group}}/${${rgd.spec.schema.apiVersion}}
+                kind: ${${rgd.spec.schema.kind}}
                 metadata:
                   selector: {}
 
@@ -186,15 +186,15 @@ spec:
             # string data through CEL and are evaluated by L2's controller.
             - id: instances
               forEach:
-                instance: $${watchInstances}
+                instance: ${${watchInstances}}
               template:
                 apiVersion: experimental.kro.run/v1alpha1
                 kind: Graph
                 metadata:
-                  name: $${instance.metadata.name}-$${rgd.spec.schema.kind.lowerAscii()} # (L2)
+                  name: ${${instance.metadata.name}}-${${rgd.spec.schema.kind.lowerAscii()}} # (L2)
                 spec:
                   nodes: >-
-                    $${
+                    ${${
                       [{"id": "schema", "ref": {
                         "apiVersion": rgd.spec.schema.group + "/" + rgd.spec.schema.apiVersion,
                         "kind": rgd.spec.schema.kind,
@@ -213,7 +213,7 @@ spec:
                         },
                         "status": rgd.spec.schema.status
                       }}]
-                    }
+                    }}
 
             # Contribute status back to the RGD
             - id: rgdStatus
@@ -221,6 +221,6 @@ spec:
                 apiVersion: experimental.kro.run/v1alpha1
                 kind: ResourceGraphDefinition
                 metadata:
-                  name: $${rgd.metadata.name}
+                  name: ${${rgd.metadata.name}}
                 status:
-                  state: $${crd.status.conditions.exists(c, c.type == 'Established' && c.status == 'True') ? 'Active':'Inactive'}
+                  state: ${${crd.status.conditions.exists(c, c.type == 'Established' && c.status == 'True') ? 'Active':'Inactive'}}

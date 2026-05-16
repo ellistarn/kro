@@ -301,15 +301,15 @@ func TestGraphReconcilesOnUpdate(t *testing.T) {
 //
 // Parent Graph (L0):
 //   - Creates ConfigMap "shared-data" with data.message = "hello-from-parent"
-//   - Creates child Graph where $${...} is stripped to ${...} before persistence
+//   - Creates child Graph where ${${...}} is stripped to ${...} before persistence
 //
 // Child Graph (L1) — reconciled independently by the same controller:
 //   - watch reads ConfigMap "shared-data" from API server into scope
-//   - Evaluates ${...} expressions (which were $${...} at L0) against its own scope
+//   - Evaluates ${...} expressions (which were ${${...}} at L0) against its own scope
 //   - Creates ConfigMap "shared-data-result" with data.output = "hello-from-parent"
 //
 // The proof: a value that traversed parent→API server→child→API server→result
-// with $${} stripping at the evaluation boundary.
+// with ${${}} stripping at the evaluation boundary.
 func TestNestedGraphEvaluationBoundary(t *testing.T) {
 	t.Parallel()
 	ns := createNamespace(t)
@@ -340,7 +340,7 @@ func TestNestedGraphEvaluationBoundary(t *testing.T) {
 					},
 					// Resource 2: Child Graph
 					// ${...} is evaluated at L0 (parent scope).
-					// $${...} is stripped to ${...} and persisted — evaluated at L1 (child scope).
+					// ${${...}} is stripped to ${...} and persisted — evaluated at L1 (child scope).
 					map[string]any{
 						"id": "childGraph",
 						"template": map[string]any{
@@ -364,21 +364,21 @@ func TestNestedGraphEvaluationBoundary(t *testing.T) {
 											},
 										},
 									},
-									// Child resource 2: template with $${...} → ${...} at L1
+									// Child resource 2: template with ${${...}} → ${...} at L1
 									map[string]any{
 										"id": "result",
 										"template": map[string]any{
 											"apiVersion": "v1",
 											"kind":       "ConfigMap",
 											"metadata": map[string]any{
-												// $${...} stripped at L0 → ${input.metadata.name}-result
+												// ${${...}} stripped at L0 → ${input.metadata.name}-result
 												// Evaluated at L1 → "shared-data-result"
-												"name": "$${input.metadata.name}-result",
+												"name": "${${input.metadata.name}}-result",
 											},
 											"data": map[string]any{
-												// $${...} stripped at L0 → ${input.data.message}
+												// ${${...}} stripped at L0 → ${input.data.message}
 												// Evaluated at L1 → "hello-from-parent"
-												"output": "$${input.data.message}",
+												"output": "${${input.data.message}}",
 												// Mix: L0-evaluated value alongside L1-deferred expression
 												"parentName": "${sharedData.metadata.name}",
 											},
@@ -403,26 +403,26 @@ func TestNestedGraphEvaluationBoundary(t *testing.T) {
 	require.NoError(t, waitForResource(ctx, k8sClient, types.NamespacedName{Name: "shared-data", Namespace: ns}, sharedData))
 	t.Logf("L0: ConfigMap shared-data created")
 
-	// Child Graph should be created by parent with ${...} stripped from $${...}
+	// Child Graph should be created by parent with ${...} stripped from ${${...}}
 	childGraph := &unstructured.Unstructured{}
 	childGraph.SetGroupVersionKind(GraphGVK)
 	require.NoError(t, waitForResource(ctx, k8sClient, types.NamespacedName{Name: "shared-data-child", Namespace: ns}, childGraph))
 	t.Logf("L0: Child Graph shared-data-child created (uid=%s)", childGraph.GetUID())
 
-	// Verify the child Graph's spec contains ${...} (was $${...} in parent, stripped by one $)
+	// Verify the child Graph's spec contains ${...} (was ${${...}} in parent, stripped by one layer)
 	childNodes, _, _ := unstructured.NestedSlice(childGraph.Object, "spec", "nodes")
 	require.Len(t, childNodes, 2, "child Graph should have 2 nodes (watch + template)")
 
-	// The result template should have ${input.metadata.name}-result (not $${...})
+	// The result template should have ${input.metadata.name}-result (not ${${...}})
 	resultRes := childNodes[1].(map[string]any)
 	resultTmpl := resultRes["template"].(map[string]any)
 	resultMeta := resultTmpl["metadata"].(map[string]any)
 	assert.Equal(t, "${input.metadata.name}-result", resultMeta["name"],
-		"$${...} should be stripped to ${...} after L0 evaluation and API server persistence")
+		"${${...}} should be stripped to ${...} after L0 evaluation and API server persistence")
 
 	resultData := resultTmpl["data"].(map[string]any)
 	assert.Equal(t, "${input.data.message}", resultData["output"],
-		"$${...} should be stripped to ${...} after L0 evaluation")
+		"${${...}} should be stripped to ${...} after L0 evaluation")
 	assert.Equal(t, "shared-data", resultData["parentName"],
 		"${...} at L0 should be fully evaluated to the concrete value")
 

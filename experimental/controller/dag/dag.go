@@ -232,12 +232,12 @@ func validateNodePropagateWhen(node graph.Node, exprPaths map[string]map[string]
 	for _, pw := range node.PropagateWhen {
 		pos := 0
 		for {
-			dollars, expr, start, _ := graph.FindExpr(pw, pos)
+			_, expr, start, end := graph.FindExpr(pw, pos)
 			if start < 0 {
 				break
 			}
-			pos = start + len(dollars) + len(expr) + 2
-			if len(dollars) != 1 {
+			pos = end
+			if graph.IsDeferred(expr) {
 				continue
 			}
 			if paths, ok := exprPaths[expr]; ok {
@@ -454,12 +454,12 @@ func buildEarlyAdjacency(nodes []graph.Node, idSet map[string]bool, nodeIndex ma
 		for _, s := range strs {
 			pos := 0
 			for {
-				dollars, expr, start, _ := graph.FindExpr(s, pos)
+				_, expr, start, end := graph.FindExpr(s, pos)
 				if start < 0 {
 					break
 				}
-				pos = start + len(dollars) + len(expr) + 2
-				if len(dollars) != 1 {
+				pos = end
+				if graph.IsDeferred(expr) {
 					continue // deferred — not a dependency at this level
 				}
 				rootID := graph.ExtractFirstIdentifier(expr)

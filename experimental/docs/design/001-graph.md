@@ -470,13 +470,14 @@ However, the child graph executes independently from the parent -- the child's n
 reference the parent's, and vice versa.
 
 When a graph is evaluated, each CEL expression `${...}` is evaluated into a concrete value. However,
-child graphs need to define their own expressions separate from the parent graph's scope. CEL
-expressions can be escaped using `$${...}` -- syntactic sugar for the string literal equivalent
-`'{}'`. When a node is evaluated, the outer `$` is removed, and the inner `${...}` is written as a
-string to the Kubernetes API in the child Graph's spec. The parent graph treats the child graph
-purely as data during its evaluation, and does not evaluate the child graph's nodes.
+child graphs need to define their own expressions separate from the parent graph's scope. When a
+`${...}` expression's body contains inner `${...}` patterns, the outer `${}` wrapper is a deferral
+boundary -- the current scope strips the outer `${}`, writing the body (including its inner `${...}`
+expressions) as a literal string to the Kubernetes API in the child Graph's spec. The child graph
+evaluates those inner expressions independently at its own runtime. A `${...}` whose body contains
+no inner `${}` is evaluated immediately as CEL in the current scope.
 
-It's common to combine nested graphs and CEL escapting with `watch`, `forEach`, `ref`, to create a
+It's common to combine nested graphs and expression nesting with `watch`, `forEach`, `ref`, to create a
 nested scope that evaluates in isolation. Below, the parent graph intentionally does not directly
 reference parent's forEach `ns`, except by name, as any change to `ns` would cause the nested graph
 to be mutated. Instead, the nested graph is configured to directly refence the `ns` itself within
@@ -512,7 +513,7 @@ its own scope.
             kind: NetworkPolicy
             metadata:
               name: default-deny
-              namespace: $${nsRef.metadata.name}
+              namespace: ${${nsRef.metadata.name}}
             spec:
               podSelector: {}
               policyTypes:

@@ -45,32 +45,32 @@ spec:
                 apiVersion: apps/v1
                 kind: Deployment
                 metadata:
-                  name: $${schema.metadata.name}
+                  name: ${${schema.metadata.name}}
                 spec:
-                  replicas: $${schema.spec.replicas}
+                  replicas: ${${schema.spec.replicas}}
                   selector:
                     matchLabels:
-                      app: $${schema.metadata.name}
+                      app: ${${schema.metadata.name}}
                   template:
                     metadata:
                       labels:
-                        app: $${schema.metadata.name}
+                        app: ${${schema.metadata.name}}
                     spec:
                       containers:
                         - name: app
-                          image: $${schema.spec.image}
+                          image: ${${schema.spec.image}}
 
             - id: service
               template:
                 apiVersion: v1
                 kind: Service
                 metadata:
-                  name: $${schema.metadata.name}-svc
+                  name: ${${schema.metadata.name}}-svc
                 spec:
                   selector:
-                    app: $${schema.metadata.name}
+                    app: ${${schema.metadata.name}}
                   ports:
-                    - port: $${schema.spec.port}
+                    - port: ${${schema.spec.port}}
 
             # Contribute status back to the WebApp instance.
             # This is a partial server-side apply — the Graph doesn't own
@@ -80,7 +80,7 @@ spec:
                 apiVersion: experimental.kro.run/v1alpha1
                 kind: WebApp
                 metadata:
-                  name: $${schema.metadata.name}
-                  namespace: $${schema.metadata.namespace}
+                  name: ${${schema.metadata.name}}
+                  namespace: ${${schema.metadata.namespace}}
                 status:
-                  deploymentReady: $${deployment.status.availableReplicas == deployment.spec.replicas}
+                  deploymentReady: ${${deployment.status.availableReplicas == deployment.spec.replicas}}

@@ -282,13 +282,13 @@ func TestForEachStampsChildGraphs(t *testing.T) {
 											"apiVersion": "v1",
 											"kind":       "ConfigMap",
 											"metadata": map[string]any{
-												// $${...} stripped at L0 → ${...} evaluated at L1
-												"name": "$${schema.metadata.name}-summary",
+												// ${${...}} stripped at L0 → ${...} evaluated at L1
+												"name": "${${schema.metadata.name}}-summary",
 											},
 											"data": map[string]any{
-												"image":    "$${schema.data.image}",
-												"replicas": "$${schema.data.replicas}",
-												"appName":  "$${schema.metadata.name}",
+												"image":    "${${schema.data.image}}",
+												"replicas": "${${schema.data.replicas}}",
+												"appName":  "${${schema.metadata.name}}",
 											},
 										},
 									},
