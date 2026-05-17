@@ -10,8 +10,11 @@
 // Graphs targeting the same resource coexist without collision — each Graph's
 // labels use its own key prefix. See 003-ownership.md § Identity Labels.
 //
-// DNS subdomain format (253-character limit) requires that graph names, node
-// IDs, and namespaces are DNS labels (no dots). Parsing is unambiguous.
+// DNS subdomain format (253-character limit) requires that node IDs and
+// namespaces are DNS labels (no dots). Graph names may contain dots (they
+// are DNS subdomains) to express hierarchy — e.g., "rgd.webapps.default-myapp".
+// Parsing is unambiguous because the first segment (nodeID) and last segment
+// (namespace) are guaranteed dot-free.
 package graph
 
 import (
@@ -104,6 +107,13 @@ func generationLabelKey(nodeID, graphName, namespace string) string {
 
 // GraphLabelSuffix returns the suffix shared by all identity labels for a graph.
 // Used to scan informer caches for the applied set.
+//
+// Safety invariant: no graph name in a namespace may be a dot-suffix of another
+// graph name in the same namespace. E.g., graphs "small" and "big.small" in the
+// same namespace would collide on HasSuffix matching. The stdlib naming hierarchy
+// (rgd.X, rgd.X.ns-name) prevents this structurally — children always live in
+// different namespaces than their parents, or carry prefixes that preclude suffix
+// overlap.
 func GraphLabelSuffix(graphName, namespace string) string {
 	return "." + strings.ToLower(graphName) + "." + strings.ToLower(namespace) + identityLabelSuffix
 }
@@ -131,22 +141,31 @@ func ParseNodeIDFromLabel(key string) (nodeID string, ok bool) {
 	return prefix[:dot], true
 }
 
-// graphNameFromLabel extracts the graph name from an identity label key
-// by parsing from the right side of the prefix (the graph identity suffix).
-// The suffix structure is always .<graphName>.<namespace>.internal.kro.run/*,
-// regardless of whether the label is for a regular node or a forEach child.
+// graphNameFromLabel extracts the graph name from an identity label key.
+// For regular node labels (nodeID.graphName.namespace.internal.kro.run/*),
+// extraction is exact: nodeID is the first dot-segment, namespace is the
+// last, and graphName is everything in between (may contain dots).
+//
+// For forEach child labels (parentID.resName.resNs.kind[.group].graphName.graphNs...),
+// the result includes resource-identity segments prepended to the graph name.
+// This is acceptable because graphNameFromLabel is used only for diagnostic
+// messages (the "other graph" name in ownership conflicts). Correctness of
+// ownership detection uses GraphLabelSuffix + HasSuffix matching, not this
+// function.
 func graphNameFromLabel(key string) string {
 	if !strings.HasSuffix(key, identityLabelSuffix) {
 		return ""
 	}
 	prefix := strings.TrimSuffix(key, identityLabelSuffix)
-	// The last two segments are graphName and namespace (right to left).
-	// Split and count from the end.
-	parts := strings.Split(prefix, ".")
-	if len(parts) < 3 {
+	// nodeID = first segment (DNS label, no dots)
+	// namespace = last segment (DNS label, no dots)
+	// graphName = everything between (may contain dots)
+	firstDot := strings.IndexByte(prefix, '.')
+	lastDot := strings.LastIndexByte(prefix, '.')
+	if firstDot <= 0 || lastDot <= firstDot {
 		return "" // need at least nodeID.graphName.namespace
 	}
-	return parts[len(parts)-2] // second-to-last is graphName
+	return prefix[firstDot+1 : lastDot]
 }
 
 // IsGraphIdentityLabel checks if a label key is an identity label for the

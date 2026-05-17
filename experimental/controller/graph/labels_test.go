@@ -76,14 +76,24 @@ func TestGraphNameFromLabel(t *testing.T) {
 			wantGraph: "my-app",
 		},
 		{
+			name:      "dotted graph name",
+			key:       "deploy.rgd.webapps.kro-system.internal.kro.run/type",
+			wantGraph: "rgd.webapps",
+		},
+		{
+			name:      "deeply dotted graph name",
+			key:       "deploy.rgd.webapps.default-myapp.kro-system.internal.kro.run/type",
+			wantGraph: "rgd.webapps.default-myapp",
+		},
+		{
 			name:      "forEach child identity label",
 			key:       "policies.default-deny.ns-a.networkpolicy.networking.k8s.io.mygraph.default.internal.kro.run/type",
-			wantGraph: "mygraph",
+			wantGraph: "default-deny.ns-a.networkpolicy.networking.k8s.io.mygraph",
 		},
 		{
 			name:      "forEach child without group",
 			key:       "configs.my-cm.default.configmap.mygraph.default.internal.kro.run/type",
-			wantGraph: "mygraph",
+			wantGraph: "my-cm.default.configmap.mygraph",
 		},
 		{
 			name:      "not an identity label",

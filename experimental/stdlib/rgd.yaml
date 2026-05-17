@@ -69,7 +69,7 @@ spec:
         apiVersion: experimental.kro.run/v1alpha1
         kind: Graph
         metadata:
-          name: rgd-${rgd.metadata.name}
+          name: rgd.${rgd.metadata.name}
           namespace: kro-system
           labels:
             kro.run/instance-name: ${rgd.metadata.name}
@@ -161,9 +161,10 @@ spec:
                 kind: Graph
                 metadata:
                   name: >-
-                    ${${(has(instance.metadata.namespace) && instance.metadata.namespace != ""
+                    ${${"rgd." + schema.metadata.name + "."
+                    + (has(instance.metadata.namespace) && instance.metadata.namespace != ""
                     ? instance.metadata.namespace + "-" : "")
-                    + instance.metadata.name + "-" + schema.spec.schema.kind.lowerAscii()}}
+                    + instance.metadata.name}}
                   namespace: '${${has(instance.metadata.namespace) && instance.metadata.namespace != "" ? instance.metadata.namespace : "kro-system"}}'
                   ownerReferences:
                     - apiVersion: '${${schema.spec.schema.group + "/" + schema.spec.schema.apiVersion}}'
