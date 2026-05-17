@@ -18,7 +18,11 @@ import (
 //
 //   spec.nodes[].readyWhen → L2 Graph node readyWhen → Graph CR Ready condition
 //   spec.propagateWhen → L1 instances forEach propagateWhen → rollout gate
-//   L1 instances forEach readyWhen → checks Graph CR Ready → stamps __ready
+//
+// The Kind controller Graph's readiness is decoupled from instance convergence.
+// A Kind's Graph is Ready once its structural work is done (CRD established,
+// instance Graphs created). Instance-level readyWhen affects only the
+// per-instance Graph's Ready condition, not the Kind controller Graph.
 //
 // Tests require the stdlib type tower (Kind CRD) to be materialized.
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -327,4 +331,99 @@ func TestStdlibKindWithPropagateWhen(t *testing.T) {
 	data, _, _ := unstructured.NestedStringMap(cm.Object, "data")
 	assert.Equal(t, "test", data["label"])
 	t.Log("Kind with propagateWhen field accepted — instance processed normally")
+}
+
+// TestStdlibKindReadyDecoupledFromInstances proves that the Kind controller
+// Graph's Ready condition is decoupled from instance convergence. A Kind's
+// Graph is Ready once its structural work is done (CRD established, instance
+// Graphs created) — it does not wait for per-instance Graphs to converge.
+//
+// This is the essential invariant: tools like Helm block on Graph Ready. If
+// instance convergence rolled up into the Kind controller Graph's Ready, Helm
+// upgrades would block indefinitely when any instance hasn't converged.
+func TestStdlibKindReadyDecoupledFromInstances(t *testing.T) {
+	t.Parallel()
+	require.NoError(t, waitForCRD(ctx, k8sClient, "kinds.experimental.kro.run", stdlibCRDTimeout))
+
+	t.Log("creating Kind with permanently unsatisfied node-level readyWhen")
+	kind := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "experimental.kro.run/v1alpha1",
+		"kind":       "Kind",
+		"metadata": map[string]any{
+			"name":      "decoupledready",
+			"namespace": "kro-system",
+		},
+		"spec": map[string]any{
+			"schema": map[string]any{
+				"apiVersion": "test.stdlib.kro.run/v1alpha1",
+				"kind":       "DecoupledReady",
+				"spec": map[string]any{
+					"value": "string | default=test",
+				},
+			},
+			"nodes": []any{
+				map[string]any{
+					"id": "cm",
+					"template": map[string]any{
+						"apiVersion": "v1",
+						"kind":       "ConfigMap",
+						"metadata": map[string]any{
+							"name":      "${schema.metadata.name}-config",
+							"namespace": "${schema.metadata.namespace}",
+						},
+						"data": map[string]any{
+							"value":  "${schema.spec.value}",
+							"status": "pending",
+						},
+					},
+					// readyWhen is permanently unsatisfied — status will
+					// never be 'healthy' because the template hard-codes 'pending'.
+					"readyWhen": []any{
+						"${cm.data.status == 'healthy'}",
+					},
+				},
+			},
+		},
+	}}
+	require.NoError(t, k8sClient.Create(ctx, kind))
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), kind) })
+
+	t.Log("waiting for DecoupledReady CRD...")
+	require.NoError(t, waitForCRD(ctx, k8sClient, "decoupledreadies.test.stdlib.kro.run", stdlibCRDTimeout))
+
+	// Create an instance — its per-instance Graph will never converge.
+	instance := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "test.stdlib.kro.run/v1alpha1",
+		"kind":       "DecoupledReady",
+		"metadata": map[string]any{
+			"name":      "dr-inst",
+			"namespace": "kro-system",
+		},
+		"spec": map[string]any{"value": "test"},
+	}}
+	require.NoError(t, k8sClient.Create(ctx, instance))
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), instance) })
+
+	// Wait for the ConfigMap to confirm the instance was processed.
+	cm := &unstructured.Unstructured{}
+	cm.SetAPIVersion("v1")
+	cm.SetKind("ConfigMap")
+	require.NoError(t, waitForResource(ctx, k8sClient,
+		types.NamespacedName{Name: "dr-inst-config", Namespace: "kro-system"}, cm, stdlibReconcileTimeout),
+		"ConfigMap not created")
+
+	// Verify the per-instance Graph is NOT ready (node readyWhen unsatisfied).
+	instanceGraphName := "kro-system-dr-inst-decoupledready"
+	require.NoError(t, waitForGraphReadyStatus(ctx, k8sClient,
+		types.NamespacedName{Name: instanceGraphName, Namespace: "kro-system"}, "Unknown", stdlibReconcileTimeout),
+		"per-instance Graph should be NotReady (readyWhen unsatisfied)")
+	t.Log("per-instance Graph is NotReady — confirmed")
+
+	// The Kind controller Graph MUST be Ready despite the instance not converging.
+	// This is the critical assertion: Kind readiness is decoupled from instance readiness.
+	kindControllerGraphName := "kind-decoupledready"
+	require.NoError(t, waitForGraphReady(ctx, k8sClient,
+		types.NamespacedName{Name: kindControllerGraphName, Namespace: "kro-system"}, stdlibReconcileTimeout),
+		"Kind controller Graph should be Ready even though instance has not converged")
+	t.Log("Kind controller Graph is Ready — readiness decoupled from instance convergence")
 }

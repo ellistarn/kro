@@ -122,10 +122,6 @@ spec:
             - id: instances
               forEach:
                 - instance: ${${watchInstances}}
-              readyWhen:
-                - >-
-                  ${${instances.status.conditions.exists(c,
-                  c.type == 'Ready' && c.status == 'True')}}
               propagateWhen: "${has(k.spec.propagateWhen) ? k.spec.propagateWhen : []}"
               template:
                 apiVersion: experimental.kro.run/v1alpha1
