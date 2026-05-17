@@ -4,6 +4,10 @@
 # Kind CRD, watches all Kinds, creates a CRD per Kind, watches instances
 # of each Kind, and creates per-instance Graphs.
 #
+# Status propagation: kindConditions (at this level) hoists the controller
+# Graph's Compiled/Ready conditions onto the Kind resource. kindCount
+# (inside each controller Graph) writes the instance count.
+#
 # Convention: inside a Kind's per-instance Graph, `schema` is the scope
 # variable (the resource itself). User nodes reference ${schema.spec.foo}.
 ---
@@ -34,7 +38,7 @@ spec:
               storage: true
               schema:
                 openAPIV3Schema: >-
-                  ${simpleSchema.toOpenAPI({"types": {"Node": {"id": "string", "template": "any", "patch": "any", "ref": "any", "watch": "any", "def": "any", "forEach": "[]map[string]string", "finalizes": "string", "includeWhen": "[]string", "readyWhen": "[]string", "propagateWhen": "[]string"}, "PrinterColumn": {"name": "string | required=true", "type": "string | required=true", "jsonPath": "string | required=true", "description": "string", "format": "string", "priority": "integer"}}, "spec": {"scope": "string | default=Namespaced", "schema": {"apiVersion": "string | required=true pattern=^[a-z][a-z0-9.-]*/[a-z][a-z0-9]*$", "kind": "string | required=true", "spec": "object", "status": "object", "types": "object"}, "propagateWhen": "[]string", "nodes": "[]Node", "additionalPrinterColumns": "[]PrinterColumn"}, "status": {"ready": "boolean", "items": "integer"}}, [])}
+                  ${simpleSchema.toOpenAPI({"types": {"Node": {"id": "string", "template": "any", "patch": "any", "ref": "any", "watch": "any", "def": "any", "forEach": "[]map[string]string", "finalizes": "string", "includeWhen": "[]string", "readyWhen": "[]string", "propagateWhen": "[]string"}, "PrinterColumn": {"name": "string | required=true", "type": "string | required=true", "jsonPath": "string | required=true", "description": "string", "format": "string", "priority": "integer"}, "Condition": {"type": "string | required=true", "status": "string | required=true", "reason": "string", "message": "string", "lastTransitionTime": "string", "observedGeneration": "integer"}}, "spec": {"scope": "string | default=Namespaced", "schema": {"apiVersion": "string | required=true pattern=^[a-z][a-z0-9.-]*/[a-z][a-z0-9]*$", "kind": "string | required=true", "spec": "object", "status": "object", "types": "object"}, "propagateWhen": "[]string", "nodes": "[]Node", "additionalPrinterColumns": "[]PrinterColumn"}, "status": {"items": "integer", "conditions": "[]Condition"}}, [])}
               subresources:
                 status: {}
               additionalPrinterColumns:
@@ -47,9 +51,12 @@ spec:
                 - name: Scope
                   type: string
                   jsonPath: .spec.scope
+                - name: Compiled
+                  type: string
+                  jsonPath: .status.conditions[?(@.type=="Compiled")].status
                 - name: Ready
-                  type: boolean
-                  jsonPath: .status.ready
+                  type: string
+                  jsonPath: .status.conditions[?(@.type=="Ready")].status
                 - name: Items
                   type: integer
                   jsonPath: .status.items
@@ -145,12 +152,29 @@ spec:
                       + k.spec.nodes
                     }}
 
-            - id: kindStatus
+            - id: kindCount
               patch:
                 apiVersion: experimental.kro.run/v1alpha1
                 kind: Kind
                 metadata:
                   name: ${${k.metadata.name}}
                 status:
-                  ready: true
                   items: ${${watchInstances.size()}}
+
+    # Hoist each controller Graph's conditions onto its Kind resource.
+    # Iterates over the observed controller Graphs and forwards their
+    # Compiled/Ready conditions directly.
+    - id: kindConditions
+      forEach:
+        - graph: ${controllers}
+      patch:
+        apiVersion: experimental.kro.run/v1alpha1
+        kind: Kind
+        metadata:
+          # Controller Graphs are named "kind-<kindname>". Strip the 5-char
+          # prefix to recover the Kind resource name.
+          name: ${graph.metadata.name.substring(5)}
+        status:
+          conditions:
+            - ${graph.status.conditions.filter(c, c.type == 'Compiled')[0]}
+            - ${graph.status.conditions.filter(c, c.type == 'Ready')[0]}

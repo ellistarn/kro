@@ -73,7 +73,9 @@ A Kind may declare `readyWhen` and `propagateWhen` at the spec level. Both are p
 evaluate in the same scope as the Kind's nodes.
 
 - **`readyWhen`** defines when each instance is considered healthy. Produces `.ready()` per-instance.
-  The Kind's overall readiness rolls up: all instances `.ready()` → Kind Ready.
+  The Kind resource's own status conditions (Compiled, Ready) are hoisted from its controller Graph —
+  they reflect whether the Kind's structural work is healthy (CRD established, watching instances),
+  decoupled from individual instance convergence.
 - **`propagateWhen`** controls rollout pace across instances. It is a per-instance input gate with
   sibling visibility — the expression references the instances collection and uses `.ready()` and
   `.updated()` per-item. Semantics are identical to
