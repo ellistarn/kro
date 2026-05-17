@@ -69,6 +69,14 @@ spec:
 to the instance's `.spec.image` field. Status expressions reference other nodes and are contributed
 back to the instance.
 
+**Status writeback mechanism.** The Kind controller synthesizes the per-instance Graph's node list as
+`[schema ref] + user nodes + [status patch]`. The `schema` ref node GETs the instance into scope.
+When `spec.schema.status` is present, a `status` patch node is appended that targets the instance's
+status subresource with the evaluated CEL expressions. The DAG naturally schedules the status patch
+last — its expressions reference node IDs from the user's nodes, creating implicit dependencies. The
+existing SSA split-apply logic (see [Ownership](003-ownership.md)) handles the separate `/status`
+endpoint. When `spec.schema.status` is absent, no status patch is generated.
+
 A Kind may declare `readyWhen` and `propagateWhen` at the spec level. Both are per-instance — they
 evaluate in the same scope as the Kind's nodes.
 

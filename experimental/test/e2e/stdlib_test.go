@@ -127,6 +127,92 @@ func TestStdlibKind(t *testing.T) {
 	t.Log("Kind pipeline works: Kind → CRD → instance → ConfigMap")
 }
 
+// TestStdlibKindStatusWriteback verifies that spec.schema.status CEL
+// expressions are evaluated and patched back onto the instance's status
+// subresource. The Kind controller synthesizes a status patch node in
+// each per-instance Graph.
+func TestStdlibKindStatusWriteback(t *testing.T) {
+	t.Parallel()
+	require.NoError(t, waitForCRD(ctx, k8sClient, "kinds.experimental.kro.run", stdlibCRDTimeout))
+
+	// Phase 1: Create a Kind whose schema.status has a CEL expression
+	// that reads from a child resource.
+	t.Log("creating Kind: StatusWidget")
+	kind := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "experimental.kro.run/v1alpha1",
+		"kind":       "Kind",
+		"metadata": map[string]any{
+			"name":      "statuswidget",
+			"namespace": "kro-system",
+		},
+		"spec": map[string]any{
+			"schema": map[string]any{
+				"apiVersion": "test.stdlib.kro.run/v1alpha1",
+				"kind":       "StatusWidget",
+				"spec": map[string]any{
+					"message": "string | default=hello",
+				},
+				"status": map[string]any{
+					"configMapName": "${cm.metadata.name}",
+				},
+			},
+			"nodes": []any{
+				map[string]any{
+					"id": "cm",
+					"template": map[string]any{
+						"apiVersion": "v1",
+						"kind":       "ConfigMap",
+						"metadata": map[string]any{
+							"name":      "${schema.metadata.name}-status-cm",
+							"namespace": "${schema.metadata.namespace}",
+						},
+						"data": map[string]any{
+							"message": "${schema.spec.message}",
+						},
+					},
+				},
+			},
+		},
+	}}
+	require.NoError(t, k8sClient.Create(ctx, kind))
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), kind) })
+
+	// Phase 2: Wait for the StatusWidget CRD.
+	t.Log("waiting for StatusWidget CRD...")
+	require.NoError(t, waitForCRD(ctx, k8sClient, "statuswidgets.test.stdlib.kro.run", stdlibCRDTimeout))
+	t.Log("StatusWidget CRD established")
+
+	// Phase 3: Create a StatusWidget instance.
+	widget := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "test.stdlib.kro.run/v1alpha1",
+		"kind":       "StatusWidget",
+		"metadata": map[string]any{
+			"name":      "my-status-widget",
+			"namespace": "kro-system",
+		},
+		"spec": map[string]any{
+			"message": "status test",
+		},
+	}}
+	require.NoError(t, k8sClient.Create(ctx, widget))
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), widget) })
+
+	// Phase 4: Verify that the status expression is evaluated and written
+	// back to the instance. The expression ${cm.metadata.name} should resolve
+	// to "my-status-widget-status-cm".
+	t.Log("waiting for status writeback on StatusWidget instance...")
+	widgetGVK := schema.GroupVersionKind{
+		Group:   "test.stdlib.kro.run",
+		Version: "v1alpha1",
+		Kind:    "StatusWidget",
+	}
+	widgetKey := types.NamespacedName{Name: "my-status-widget", Namespace: "kro-system"}
+	require.NoError(t, waitForField(ctx, k8sClient, widgetGVK, widgetKey,
+		[]string{"status", "configMapName"}, "my-status-widget-status-cm", stdlibReconcileTimeout),
+		"status.configMapName not written back to StatusWidget instance within timeout")
+	t.Log("Kind status writeback works: schema.status CEL → instance .status")
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Decorator
 //
