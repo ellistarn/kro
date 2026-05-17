@@ -216,18 +216,23 @@ func TestFinalizesTargetAbsentSkips(t *testing.T) {
 	t.Log("Finalization correctly skipped — target was already absent")
 }
 
-// TestFinalizesRejectsCELNames proves that a finalizes node with a
-// CEL-evaluated metadata.name is rejected at spec validation time.
-func TestFinalizesRejectsCELNames(t *testing.T) {
+// TestFinalizesDynamicName proves that a finalizes node with a
+// CEL-evaluated metadata.name compiles and executes correctly. The
+// finalization engine evaluates templates via eval.toMapNode() with the
+// full forward-walk scope, and advanceTarget protects dynamically-named
+// finalizer resources via the live path before pruning.
+func TestFinalizesDynamicName(t *testing.T) {
 	t.Parallel()
 	ns := createNamespace(t)
+
+	cmGVK := schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"}
 
 	graph := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "experimental.kro.run/v1alpha1",
 			"kind":       "Graph",
 			"metadata": map[string]any{
-				"name":      "test-finalize-cel-reject",
+				"name":      "test-finalize-dynamic-name",
 				"namespace": ns,
 			},
 			"spec": map[string]any{
@@ -237,8 +242,17 @@ func TestFinalizesRejectsCELNames(t *testing.T) {
 						"template": map[string]any{
 							"apiVersion": "v1",
 							"kind":       "ConfigMap",
-							"metadata":   map[string]any{"name": "cel-target"},
+							"metadata":   map[string]any{"name": "dyn-target"},
 							"data":       map[string]any{"state": "active"},
+						},
+					},
+					map[string]any{
+						"id": "keep",
+						"template": map[string]any{
+							"apiVersion": "v1",
+							"kind":       "ConfigMap",
+							"metadata":   map[string]any{"name": "dyn-keep"},
+							"data":       map[string]any{"role": "permanent"},
 						},
 					},
 					map[string]any{
@@ -259,11 +273,51 @@ func TestFinalizesRejectsCELNames(t *testing.T) {
 	}
 	require.NoError(t, k8sClient.Create(ctx, graph))
 
-	// The Graph should be rejected — Compiled should be False with a
-	// compilation error about CEL-evaluated names on finalizes nodes.
-	require.NoError(t, waitForGraphCompiledStatus(ctx, k8sClient,
-		types.NamespacedName{Name: "test-finalize-cel-reject", Namespace: ns}, "False"))
-	t.Log("Graph correctly rejected — CEL-evaluated name on finalizes node")
+	// Graph should compile successfully — dynamic names on finalizes nodes
+	// are now permitted.
+	graphKey := types.NamespacedName{Name: "test-finalize-dynamic-name", Namespace: ns}
+	require.NoError(t, waitForGraphCompiledStatus(ctx, k8sClient, graphKey, "True"))
+	t.Log("Graph compiled successfully with dynamic-name finalizer node")
+
+	// Wait for the target to be created and graph to be ready.
+	targetCM := &unstructured.Unstructured{}
+	targetCM.SetGroupVersionKind(cmGVK)
+	require.NoError(t, waitForResource(ctx, k8sClient,
+		types.NamespacedName{Name: "dyn-target", Namespace: ns}, targetCM))
+	require.NoError(t, waitForGraphReady(ctx, k8sClient, graphKey))
+	t.Log("Target created and graph ready")
+
+	// Phase 2: Remove target and snapshot from spec to trigger finalization.
+	require.NoError(t, updateWithRetry(ctx, k8sClient, GraphGVK, graphKey, func(obj *unstructured.Unstructured) {
+		unstructured.SetNestedSlice(obj.Object, []any{
+			map[string]any{
+				"id": "keep",
+				"template": map[string]any{
+					"apiVersion": "v1",
+					"kind":       "ConfigMap",
+					"metadata":   map[string]any{"name": "dyn-keep"},
+					"data":       map[string]any{"role": "permanent"},
+				},
+			},
+		}, "spec", "nodes")
+	}))
+	t.Log("Updated spec: removed target and snapshot nodes")
+
+	// Wait for target deletion — proves the full finalization sequence ran:
+	// the finalizer resource was created with the evaluated name
+	// "dyn-target-snapshot" (from "${target.metadata.name}-snapshot"),
+	// became ready, then the target was deleted. The finalizer resource
+	// itself is ephemeral — created and cleaned up within the same cycle.
+	require.NoError(t, waitForDeletion(ctx, k8sClient, cmGVK,
+		types.NamespacedName{Name: "dyn-target", Namespace: ns}))
+	t.Log("Target deleted after finalization — dynamic-name finalization proved")
+
+	// The "keep" resource should still exist.
+	keepCM := &unstructured.Unstructured{}
+	keepCM.SetGroupVersionKind(cmGVK)
+	require.NoError(t, k8sClient.Get(ctx,
+		types.NamespacedName{Name: "dyn-keep", Namespace: ns}, keepCM))
+	t.Log("Keep resource still alive — only target was pruned")
 }
 
 // TestFinalizesReadyWhenGatesTargetRemoval proves that a finalizer node's

@@ -224,19 +224,8 @@ func parseModifiers(node *Node, m map[string]any, i int, id string, allNodeIDsLo
 // multiple parsed fields being present together. Must run after both the
 // body keyword and modifiers have been parsed.
 func validateNodeConstraints(node *Node, i int, id string) error {
-	if node.Finalizes == "" || node.ForEach != nil {
+	if node.Finalizes == "" {
 		return nil
-	}
-	// Finalizes nodes must not have CEL-evaluated names unless they also
-	// have forEach (which requires dynamic per-item names). Static-name
-	// finalizers are looked up by key during prune; forEach finalizers use
-	// label-based discovery for cleanup.
-	if body := node.Identity(); body != nil {
-		if md, ok := body["metadata"].(map[string]any); ok {
-			if name, ok := md["name"].(string); ok && strings.Contains(name, "${") {
-				return fmt.Errorf("node[%d] %q: finalizes nodes must not have CEL-evaluated names (found expression in metadata.name); use forEach for per-item finalizers", i, id)
-			}
-		}
 	}
 	if node.Type() == NodeTypeDef {
 		return fmt.Errorf("node[%d] %q: finalizes is not valid on def nodes (no Kubernetes resource to finalize)", i, id)
