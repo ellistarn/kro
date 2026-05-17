@@ -115,7 +115,7 @@ func celSimpleSchemaFunction() []cel.EnvOption {
 
 		specMap, _ := schemaMap["spec"].(map[string]any)
 		if specMap == nil {
-			specMap = schemaMap
+			specMap = map[string]any{}
 		}
 		customTypes, _ := schemaMap["types"].(map[string]any)
 
