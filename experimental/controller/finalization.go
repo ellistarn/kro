@@ -37,9 +37,12 @@ type finalizationResult struct {
 	CompletedTargets map[string]bool
 	// ProtectedKeys: keys that must not be pruned (active children + static deps).
 	ProtectedKeys map[string]bool
-	// ChildKeysToCleanup: maps target key → child keys to delete AFTER
-	// the target is successfully deleted by the prune walk.
-	ChildKeysToCleanup map[string][]string
+	// ChildKeysToCleanup: maps target key → finalizer children to clean up
+	// AFTER the target is successfully deleted by the prune walk.
+	// Template children are deleted; patch children are release-applied
+	// (releasing SSA field ownership so their fields persist on the external
+	// resource but kro no longer claims them).
+	ChildKeysToCleanup map[string][]finalizationChild
 	// BlockedReasons: TeardownBlocked messages for in-progress sequences.
 	BlockedReasons []string
 	// Notes: informational messages (FinalizerSkipped — target absent).
@@ -66,7 +69,7 @@ func (c *clusterAccess) advanceFinalization(
 	result := &finalizationResult{
 		CompletedTargets:   map[string]bool{},
 		ProtectedKeys:      map[string]bool{},
-		ChildKeysToCleanup: map[string][]string{},
+		ChildKeysToCleanup: map[string][]finalizationChild{},
 	}
 
 	// findFinalizers looks up finalizer node IDs for a target across all DAGs.
@@ -169,11 +172,11 @@ func (c *clusterAccess) advanceTarget(
 	}
 
 	// Run the finalization sequence.
-	ready, childKeys, finErr := c.runFinalization(ctx, rs, obj, nodeID, finalizerNodeIDs, finDAG, eval)
+	ready, children, finErr := c.runFinalization(ctx, rs, obj, nodeID, finalizerNodeIDs, finDAG, eval)
 
 	// Protect all child keys from pruning.
-	for _, ck := range childKeys {
-		result.ProtectedKeys[ck] = true
+	for _, child := range children {
+		result.ProtectedKeys[child.Key] = true
 	}
 
 	if finErr != nil {
@@ -195,9 +198,13 @@ func (c *clusterAccess) advanceTarget(
 	}
 
 	// Finalization complete — target can be deleted.
+	// All children go into cleanup: template children are deleted, patch
+	// children are release-applied (releasing SSA field ownership).
 	logger.Info("finalization complete", "key", key)
 	result.CompletedTargets[key] = true
-	result.ChildKeysToCleanup[key] = childKeys
+	if len(children) > 0 {
+		result.ChildKeysToCleanup[key] = children
+	}
 	return nil
 }
 
@@ -242,16 +249,31 @@ func (c *clusterAccess) ensureFinalizerResource(
 		// Create finalizer resource.
 		logger.Info("creating finalizer resource", "finalizer", node.ID,
 			"name", obj.GetName())
-		applied, applyErr := c.applySSA(ctx, rs, evalMap, node.ID, graphpkg.NodeTypeTemplate, eval.effectiveGeneration, false)
+		applied, applyErr := c.applySSA(ctx, rs, evalMap, node.ID, node.Type(), eval.effectiveGeneration, false)
 		if applyErr != nil {
 			return false, "", fmt.Errorf("creating finalizer resource %s: %w", node.ID, applyErr)
 		}
 		return false, resourceKey(applied), nil
 	}
 
-	// Exists — update scope to cluster state so readyWhen evaluates against
-	// real status fields, not the template output.
-	eval.scope[node.ID] = graphpkg.NormalizeTypes(existing.Object)
+	// Exists — for patch nodes, re-apply SSA every cycle since the patch
+	// IS the finalization action (setting fields on an external resource).
+	// Force-apply is used because the resource is external and field conflicts
+	// with other managers are expected and intentional.
+	// For template nodes, the resource was already created above; no re-apply needed.
+	if node.Type() == graphpkg.NodeTypePatch {
+		logger.Info("applying finalizer patch", "finalizer", node.ID,
+			"name", obj.GetName())
+		applied, applyErr := c.applySSA(ctx, rs, evalMap, node.ID, node.Type(), eval.effectiveGeneration, true)
+		if applyErr != nil {
+			return false, "", fmt.Errorf("applying finalizer patch %s: %w", node.ID, applyErr)
+		}
+		eval.scope[node.ID] = graphpkg.NormalizeTypes(applied.Object)
+	} else {
+		// Use cluster state so readyWhen evaluates against real status fields,
+		// not the template output.
+		eval.scope[node.ID] = graphpkg.NormalizeTypes(existing.Object)
+	}
 
 	key := resourceKey(existing)
 	if len(node.ReadyWhen) > 0 {
@@ -264,10 +286,17 @@ func (c *clusterAccess) ensureFinalizerResource(
 	return true, key, nil
 }
 
+// finalizationChild pairs a resource key with the node type that produced it.
+// Used to dispatch cleanup correctly: template → delete, patch → skip (persist).
+type finalizationChild struct {
+	Key      string
+	NodeType graphpkg.NodeType
+}
+
 // runFinalization executes the finalization sequence for a single target.
-// Returns (true, keys, nil) when all finalizer resources are ready.
-// Returns (false, keys, nil) when finalizers are in progress.
-// Returns (false, keys, err) when a finalizer can't be created.
+// Returns (true, children, nil) when all finalizer resources are ready.
+// Returns (false, children, nil) when finalizers are in progress.
+// Returns (false, children, err) when a finalizer can't be created.
 func (c *clusterAccess) runFinalization(
 	ctx context.Context,
 	rs *reconcileScope,
@@ -276,8 +305,8 @@ func (c *clusterAccess) runFinalization(
 	finalizerNodeIDs []string,
 	dag *dagpkg.DAG,
 	eval *evaluator,
-) (bool, []string, error) {
-	var keys []string
+) (bool, []finalizationChild, error) {
+	var children []finalizationChild
 
 	// Put the target in scope so finalizer templates can reference it.
 	if targetNodeID != "" {
@@ -291,16 +320,16 @@ func (c *clusterAccess) runFinalization(
 	for _, finNodeID := range ordered {
 		idx, ok := dag.Index[finNodeID]
 		if !ok {
-			return false, keys, fmt.Errorf("finalizer node %q not found in DAG", finNodeID)
+			return false, children, fmt.Errorf("finalizer node %q not found in DAG", finNodeID)
 		}
 		finNode := &dag.Nodes[idx]
 
 		// forEach + finalizes: expand collection.
 		if finNode.ForEach != nil {
-			ready, fKeys, err := c.runForEachFinalization(ctx, rs, finNode, dag, eval)
-			keys = append(keys, fKeys...)
+			ready, fChildren, err := c.runForEachFinalization(ctx, rs, finNode, dag, eval)
+			children = append(children, fChildren...)
 			if err != nil {
-				return false, keys, err
+				return false, children, err
 			}
 			if !ready {
 				allReady = false
@@ -311,7 +340,7 @@ func (c *clusterAccess) runFinalization(
 		// Single-resource finalizer.
 		evalMap, err := eval.toMapNode(*finNode)
 		if err != nil {
-			return false, keys, fmt.Errorf("evaluating finalizer template %s: %w", finNodeID, err)
+			return false, children, fmt.Errorf("evaluating finalizer template %s: %w", finNodeID, err)
 		}
 
 		// Seed scope with template output so downstream finalizer templates
@@ -320,15 +349,15 @@ func (c *clusterAccess) runFinalization(
 		eval.scope[finNodeID] = graphpkg.NormalizeTypes((&unstructured.Unstructured{Object: evalMap}).Object)
 		ready, key, ensureErr := c.ensureFinalizerResource(ctx, rs, eval, finNode, evalMap)
 		if ensureErr != nil {
-			return false, keys, ensureErr
+			return false, children, ensureErr
 		}
-		keys = append(keys, key)
+		children = append(children, finalizationChild{Key: key, NodeType: finNode.Type()})
 		if !ready {
 			allReady = false
 		}
 	}
 
-	return allReady, keys, nil
+	return allReady, children, nil
 }
 
 // runForEachFinalization handles the forEach + finalizes case.
@@ -338,9 +367,9 @@ func (c *clusterAccess) runForEachFinalization(
 	finNode *graphpkg.Node,
 	dag *dagpkg.DAG,
 	eval *evaluator,
-) (bool, []string, error) {
+) (bool, []finalizationChild, error) {
 	logger := log.FromContext(ctx)
-	var createdKeys []string
+	var children []finalizationChild
 	allReady := true
 
 	varName := finNode.ForEach.VarName
@@ -348,7 +377,7 @@ func (c *clusterAccess) runForEachFinalization(
 
 	collection, err := eval.evalString(collectionExpr)
 	if err != nil {
-		return false, createdKeys, fmt.Errorf("forEach finalizer %s: evaluating collection %q: %w", finNode.ID, collectionExpr, err)
+		return false, children, fmt.Errorf("forEach finalizer %s: evaluating collection %q: %w", finNode.ID, collectionExpr, err)
 	}
 
 	items, ok := collection.([]any)
@@ -364,28 +393,28 @@ func (c *clusterAccess) runForEachFinalization(
 
 		evalMap, err := innerEval.toMapNode(*finNode)
 		if err != nil {
-			return false, createdKeys, fmt.Errorf("forEach finalizer %s item: %w", finNode.ID, err)
+			return false, children, fmt.Errorf("forEach finalizer %s item: %w", finNode.ID, err)
 		}
 
 		childObj := &unstructured.Unstructured{Object: evalMap}
 		if childObj.GetNamespace() == "" {
 			childObj.SetNamespace(rs.namespace)
 		}
-		graphpkg.StampForEachChildLabels(childObj, finNode.ID, rs.name, rs.namespace, eval.effectiveGeneration, graphpkg.NodeTypeTemplate)
+		graphpkg.StampForEachChildLabels(childObj, finNode.ID, rs.name, rs.namespace, eval.effectiveGeneration, finNode.Type())
 		evalMap = childObj.Object
 
 		innerEval.scope[finNode.ID] = graphpkg.NormalizeTypes(childObj.Object)
 		ready, key, ensureErr := c.ensureFinalizerResource(ctx, rs, innerEval, finNode, evalMap)
 		if ensureErr != nil {
-			return false, createdKeys, ensureErr
+			return false, children, ensureErr
 		}
-		createdKeys = append(createdKeys, key)
+		children = append(children, finalizationChild{Key: key, NodeType: finNode.Type()})
 		if !ready {
 			allReady = false
 		}
 	}
 
-	return allReady, createdKeys, nil
+	return allReady, children, nil
 }
 
 // ---------------------------------------------------------------------------
