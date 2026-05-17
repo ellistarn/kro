@@ -51,7 +51,7 @@ spec:
         apiVersion: experimental.kro.run/v1alpha1
         kind: Graph
         metadata:
-          name: decorator-${schema.metadata.namespace}-${schema.metadata.name}
+          name: decorator.${schema.metadata.namespace}-${schema.metadata.name}
           namespace: kro-system
         spec:
           nodes:
@@ -80,7 +80,7 @@ spec:
                 apiVersion: experimental.kro.run/v1alpha1
                 kind: Graph
                 metadata:
-                  name: ${${decorator.metadata.namespace + "-" + decorator.metadata.name + "-" + item.metadata.namespace + "-" + item.metadata.name}}
+                  name: ${${"decorator." + decorator.metadata.namespace + "-" + decorator.metadata.name + "." + item.metadata.namespace + "-" + item.metadata.name}}
                 spec:
                   nodes: >-
                     ${${

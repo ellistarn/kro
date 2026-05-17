@@ -230,11 +230,13 @@ namespace `default`:
 This is the same label key structure as any node — the parent ID is the first label, followed by the
 resource key components as additional DNS labels before the graph identity. A non-forEach node
 `config` produces `config.mygraph.default.internal.kro.run/type`. The label prefix is a DNS
-subdomain (253-character limit); graph names and non-forEach node IDs are single DNS labels, forEach
-children extend the prefix with additional labels. Uniqueness is across the full resource key (GVK +
-namespace + name). If the rendered key changes, that's a new child — the old one is a prune
-candidate. Resource keys must be unique across children of the same parent — validated at expansion
-time.
+subdomain (253-character limit); non-forEach node IDs and namespaces are single DNS labels (no
+dots). Graph names are DNS subdomains and may contain dots to express hierarchy (e.g.,
+`rgd.webapps.default-myapp`). Parsing is unambiguous because the first segment (nodeID) and last
+segment (namespace) are guaranteed dot-free. forEach children extend the prefix with additional
+labels. Uniqueness is across the full resource key (GVK + namespace + name). If the rendered key
+changes, that's a new child — the old one is a prune candidate. Resource keys must be unique across
+children of the same parent — validated at expansion time.
 
 ### Parent Expansion
 
