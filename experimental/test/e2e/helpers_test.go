@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -43,12 +44,43 @@ func waitForCRD(ctx context.Context, c client.Client, name string, timeout ...ti
 		if err := c.Get(ctx, types.NamespacedName{Name: name}, crd); err != nil {
 			return false, nil
 		}
+		established := false
 		for _, cond := range crd.Status.Conditions {
 			if cond.Type == apiextensionsv1.Established && cond.Status == apiextensionsv1.ConditionTrue {
-				return true, nil
+				established = true
+				break
 			}
 		}
-		return false, nil
+		if !established {
+			return false, nil
+		}
+		// CRD is Established but the REST mapper may not have refreshed yet.
+		// Verify by attempting a List against the new resource's endpoint.
+		group := crd.Spec.Group
+		plural := crd.Spec.Names.Plural
+		version := ""
+		for _, v := range crd.Spec.Versions {
+			if v.Served {
+				version = v.Name
+				break
+			}
+		}
+		if group == "" || plural == "" || version == "" {
+			return true, nil // can't verify, assume ready
+		}
+		list := &unstructured.UnstructuredList{}
+		list.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   group,
+			Version: version,
+			Kind:    crd.Spec.Names.Kind + "List",
+		})
+		if err := c.List(ctx, list, client.Limit(1)); err != nil {
+			if meta.IsNoMatchError(err) {
+				return false, nil // endpoint not serving yet
+			}
+			// Other errors (forbidden, etc.) mean the endpoint exists
+		}
+		return true, nil
 	})
 }
 

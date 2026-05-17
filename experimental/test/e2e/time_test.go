@@ -1751,13 +1751,8 @@ func TestTimeNowMultipleGates(t *testing.T) {
 	require.NoError(t, waitForResource(ctx, k8sClient,
 		types.NamespacedName{Name: "fast-output", Namespace: ns}, fastOutput, 6*time.Second),
 		"fast gate (3s) must fire within 6s")
-	t.Log("Fast gate fired")
-
-	// Slow gate should still be absent for 5s after fast appeared.
-	err := waitForAbsence(ctx, k8sClient, cmGVK,
-		types.NamespacedName{Name: "slow-output", Namespace: ns}, 2*time.Second)
-	require.NoError(t, err, "slow gate must not fire before its threshold")
-	t.Log("Confirmed: slow-output still absent after fast appeared")
+	fastFired := time.Now()
+	t.Logf("Fast gate fired at %s", fastFired.Format(time.RFC3339Nano))
 
 	// Slow gate should fire within 18s from test start.
 	slowOutput := &unstructured.Unstructured{}
@@ -1765,12 +1760,21 @@ func TestTimeNowMultipleGates(t *testing.T) {
 	require.NoError(t, waitForResource(ctx, k8sClient,
 		types.NamespacedName{Name: "slow-output", Namespace: ns}, slowOutput, 18*time.Second),
 		"slow gate (12s) must fire within 18s")
+	slowFired := time.Now()
+	t.Logf("Slow gate fired at %s", slowFired.Format(time.RFC3339Nano))
+
+	// Temporal ordering: slow must fire meaningfully after fast.
+	// The threshold gap is 9s (12s - 3s). Allow generous slack for CI,
+	// but assert at least 3s separation to prove independent scheduling.
+	gap := slowFired.Sub(fastFired)
+	assert.GreaterOrEqual(t, gap.Seconds(), 3.0,
+		"slow gate must fire at least 3s after fast gate (gap=%.1fs)", gap.Seconds())
 
 	fastData, _, _ := unstructured.NestedString(fastOutput.Object, "data", "gate")
 	slowData, _, _ := unstructured.NestedString(slowOutput.Object, "data", "gate")
 	assert.Equal(t, "fast", fastData)
 	assert.Equal(t, "slow", slowData)
-	t.Log("Multiple gates proved: each resolved independently at its own threshold")
+	t.Logf("Multiple gates proved: fast→slow with %.1fs gap", gap.Seconds())
 }
 
 // TestTimeNowInReadyWhen proves that time.now() works in readyWhen context.
