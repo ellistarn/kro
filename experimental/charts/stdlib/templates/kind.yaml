@@ -139,6 +139,7 @@ spec:
                     + (has(instance.metadata.namespace) && instance.metadata.namespace != ""
                     ? instance.metadata.namespace + "-" : "")
                     + instance.metadata.name}}
+                  namespace: '${${k.spec.scope == "Namespaced" ? instance.metadata.namespace : "kro-system"}}'
                 spec:
                   nodes: >-
                     ${${
