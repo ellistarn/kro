@@ -12,7 +12,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -437,9 +436,9 @@ func TestConditionPreservesTransitionTime(t *testing.T) {
 	require.NoError(t, waitForGraphReady(ctx, k8sClient,
 		types.NamespacedName{Name: "test-condition-preserve", Namespace: ns}))
 
-	// Wait for settle so we have a stable lastTransitionTime.
-	require.NoError(t, waitForSettle(ctx, k8sClient, crGVK,
-		types.NamespacedName{Name: "preserve-instance", Namespace: ns}))
+	// Wait for initial condition to appear (status=True).
+	require.NoError(t, waitForConditionStatus(ctx, t, k8sClient, crGVK,
+		types.NamespacedName{Name: "preserve-instance", Namespace: ns}, "Ready", "True", 15*time.Second))
 
 	// Record T1.
 	obj := &unstructured.Unstructured{}
@@ -459,8 +458,8 @@ func TestConditionPreservesTransitionTime(t *testing.T) {
 		}))
 
 	// Wait for the message to propagate (proves reconcile happened).
-	require.NoError(t, waitForSettle(ctx, k8sClient, crGVK,
-		types.NamespacedName{Name: "preserve-instance", Namespace: ns}))
+	require.NoError(t, waitForConditionMessage(ctx, k8sClient, crGVK,
+		types.NamespacedName{Name: "preserve-instance", Namespace: ns}, "updated message"))
 
 	// Read again and assert lastTransitionTime is preserved.
 	obj2 := &unstructured.Unstructured{}
@@ -572,9 +571,9 @@ func TestConditionTransitionStamps(t *testing.T) {
 	require.NoError(t, waitForGraphReady(ctx, k8sClient,
 		types.NamespacedName{Name: "test-condition-transition", Namespace: ns}))
 
-	// Wait for initial condition to settle.
-	require.NoError(t, waitForSettle(ctx, k8sClient, crGVK,
-		types.NamespacedName{Name: "trans-instance", Namespace: ns}))
+	// Wait for initial condition to appear (status=True).
+	require.NoError(t, waitForConditionStatus(ctx, t, k8sClient, crGVK,
+		types.NamespacedName{Name: "trans-instance", Namespace: ns}, "Ready", "True", 15*time.Second))
 
 	// Record T1 (status=True).
 	obj := &unstructured.Unstructured{}
@@ -601,8 +600,8 @@ func TestConditionTransitionStamps(t *testing.T) {
 		}))
 
 	// Wait for condition status to flip to False.
-	require.NoError(t, waitForConditionStatus(ctx, k8sClient, crGVK,
-		types.NamespacedName{Name: "trans-instance", Namespace: ns}, "Ready", "False"))
+	require.NoError(t, waitForConditionStatus(ctx, t, k8sClient, crGVK,
+		types.NamespacedName{Name: "trans-instance", Namespace: ns}, "Ready", "False", 30*time.Second))
 
 	// Read T2 and assert it's newer than T1.
 	obj2 := &unstructured.Unstructured{}
@@ -622,35 +621,7 @@ func TestConditionTransitionStamps(t *testing.T) {
 	t.Logf("Transition proved: T1=%s (True) → T2=%s (False)", t1Str, t2Str)
 }
 
-// ---------------------------------------------------------------------------
-// Test-local helpers
-// ---------------------------------------------------------------------------
 
-// waitForConditionStatus polls until a resource's status.conditions contains
-// a condition with the given type and status value.
-func waitForConditionStatus(ctx context.Context, c client.Client, gvk schema.GroupVersionKind, key types.NamespacedName, condType, wantStatus string) error {
-	return wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 30*time.Second, true, func(ctx context.Context) (bool, error) {
-		obj := &unstructured.Unstructured{}
-		obj.SetGroupVersionKind(gvk)
-		if err := c.Get(ctx, key, obj); err != nil {
-			return false, nil
-		}
-		conditions, found, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
-		if !found {
-			return false, nil
-		}
-		for _, c := range conditions {
-			cMap, ok := c.(map[string]any)
-			if !ok {
-				continue
-			}
-			if cMap["type"] == condType && cMap["status"] == wantStatus {
-				return true, nil
-			}
-		}
-		return false, nil
-	})
-}
 
 // TestConditionOnMissingStatus proves that .condition() gracefully handles
 // the case where status.conditions is nil/absent — the condition is created
@@ -720,8 +691,8 @@ func TestConditionOnMissingStatus(t *testing.T) {
 	require.NoError(t, k8sClient.Create(ctx, graph))
 
 	// Wait for condition to appear.
-	require.NoError(t, waitForConditionStatus(ctx, k8sClient, crGVK,
-		types.NamespacedName{Name: "missing-instance", Namespace: ns}, "Initialized", "True"))
+	require.NoError(t, waitForConditionStatus(ctx, t, k8sClient, crGVK,
+		types.NamespacedName{Name: "missing-instance", Namespace: ns}, "Initialized", "True", 30*time.Second))
 
 	// Read the instance and verify the condition fields.
 	obj := &unstructured.Unstructured{}
@@ -840,8 +811,8 @@ func TestConditionRapidTransitions(t *testing.T) {
 	require.NoError(t, k8sClient.Create(ctx, graph))
 
 	// Wait for initial condition (status=True).
-	require.NoError(t, waitForConditionStatus(ctx, k8sClient, crGVK,
-		types.NamespacedName{Name: "rapid-instance", Namespace: ns}, "Ready", "True"))
+	require.NoError(t, waitForConditionStatus(ctx, t, k8sClient, crGVK,
+		types.NamespacedName{Name: "rapid-instance", Namespace: ns}, "Ready", "True", 30*time.Second))
 
 	// Record T1.
 	obj := &unstructured.Unstructured{}
@@ -866,8 +837,8 @@ func TestConditionRapidTransitions(t *testing.T) {
 		}))
 
 	// Wait for status=False.
-	require.NoError(t, waitForConditionStatus(ctx, k8sClient, crGVK,
-		types.NamespacedName{Name: "rapid-instance", Namespace: ns}, "Ready", "False"))
+	require.NoError(t, waitForConditionStatus(ctx, t, k8sClient, crGVK,
+		types.NamespacedName{Name: "rapid-instance", Namespace: ns}, "Ready", "False", 30*time.Second))
 
 	// Record T2.
 	obj2 := &unstructured.Unstructured{}
@@ -893,8 +864,8 @@ func TestConditionRapidTransitions(t *testing.T) {
 		}))
 
 	// Wait for status=True again.
-	require.NoError(t, waitForConditionStatus(ctx, k8sClient, crGVK,
-		types.NamespacedName{Name: "rapid-instance", Namespace: ns}, "Ready", "True"))
+	require.NoError(t, waitForConditionStatus(ctx, t, k8sClient, crGVK,
+		types.NamespacedName{Name: "rapid-instance", Namespace: ns}, "Ready", "True", 30*time.Second))
 
 	// Record T3.
 	obj3 := &unstructured.Unstructured{}
@@ -1126,8 +1097,8 @@ func TestConditionWithTimeGate(t *testing.T) {
 	require.NoError(t, k8sClient.Create(ctx, graph))
 
 	// Initially condition should be status=False (time hasn't elapsed).
-	require.NoError(t, waitForConditionStatus(ctx, k8sClient, crGVK,
-		types.NamespacedName{Name: "bake-instance", Namespace: ns}, "Baked", "False"))
+	require.NoError(t, waitForConditionStatus(ctx, t, k8sClient, crGVK,
+		types.NamespacedName{Name: "bake-instance", Namespace: ns}, "Baked", "False", 30*time.Second))
 
 	// Record T1 (False state).
 	obj := &unstructured.Unstructured{}
@@ -1142,8 +1113,8 @@ func TestConditionWithTimeGate(t *testing.T) {
 	t.Logf("T1: status=False, lastTransitionTime=%s", t1Str)
 
 	// Wait for condition with status=True (should happen after ~4s via time solving).
-	require.NoError(t, waitForConditionStatus(ctx, k8sClient, crGVK,
-		types.NamespacedName{Name: "bake-instance", Namespace: ns}, "Baked", "True"),
+	require.NoError(t, waitForConditionStatus(ctx, t, k8sClient, crGVK,
+		types.NamespacedName{Name: "bake-instance", Namespace: ns}, "Baked", "True", 30*time.Second),
 		"condition should flip to True after ~4s bake period")
 
 	// Record T2 and assert lastTransitionTime advanced.
@@ -1489,7 +1460,7 @@ func TestConditionObservedGenerationUpdates(t *testing.T) {
 
 	// Wait for condition to appear and record observedGeneration.
 	key := types.NamespacedName{Name: "gen-instance", Namespace: ns}
-	require.NoError(t, waitForConditionStatus(ctx, k8sClient, crGVK, key, "Ready", "True"))
+	require.NoError(t, waitForConditionStatus(ctx, t, k8sClient, crGVK, key, "Ready", "True", 30*time.Second))
 
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(crGVK)

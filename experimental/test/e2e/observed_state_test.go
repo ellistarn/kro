@@ -66,7 +66,7 @@ func TestObservedState_SelfReferenceFirstCreate(t *testing.T) {
 								"value": "hello",
 							},
 							"status": map[string]any{
-								"generation": "${myresource.?metadata.?generation.orValue(0)}",
+								"generation": "${string(myresource.?metadata.?generation.orValue(0))}",
 							},
 						},
 					},
@@ -81,9 +81,10 @@ func TestObservedState_SelfReferenceFirstCreate(t *testing.T) {
 	require.NoError(t, waitForGraphReady(ctx, k8sClient,
 		types.NamespacedName{Name: "test-selfref-first-create", Namespace: ns}))
 
-	// Wait for the instance to exist and its status.generation to be populated.
-	require.NoError(t, waitForSettle(ctx, k8sClient, crGVK,
-		types.NamespacedName{Name: "selfref-instance", Namespace: ns}))
+	// Wait for the instance to exist and its status.generation to converge.
+	require.NoError(t, waitForField(ctx, k8sClient, crGVK,
+		types.NamespacedName{Name: "selfref-instance", Namespace: ns},
+		[]string{"status", "generation"}, "1", 15*time.Second))
 
 	// Read the instance and assert status.generation >= 1.
 	obj := &unstructured.Unstructured{}
@@ -96,11 +97,12 @@ func TestObservedState_SelfReferenceFirstCreate(t *testing.T) {
 	require.True(t, found, "spec.value should exist")
 	assert.Equal(t, "hello", val)
 
-	// status.generation should be >= 1 (server-assigned after first create)
-	statusGen := extractNumericField(t, obj, "status", "generation")
-	assert.GreaterOrEqual(t, statusGen, int64(1),
-		"status.generation should be >= 1 after self-reference reads live object")
-	t.Logf("Self-reference first create proved: status.generation=%d", statusGen)
+	// status.generation should be "1" (server-assigned after first create, now a string via CEL)
+	gen, found2, _ := unstructured.NestedString(obj.Object, "status", "generation")
+	require.True(t, found2, "status.generation should exist")
+	assert.Equal(t, "1", gen,
+		"status.generation should be '1' after self-reference reads live object")
+	t.Logf("Self-reference first create proved: status.generation=%s", gen)
 }
 
 // TestObservedState_SelfReferenceConditionLifecycle proves that a single
@@ -192,9 +194,9 @@ func TestObservedState_SelfReferenceConditionLifecycle(t *testing.T) {
 	require.NoError(t, waitForGraphReady(ctx, k8sClient,
 		types.NamespacedName{Name: "test-selfref-condition-lifecycle", Namespace: ns}))
 
-	// Wait for settle so the condition is stable.
-	require.NoError(t, waitForSettle(ctx, k8sClient, crGVK,
-		types.NamespacedName{Name: "lifecycle-instance", Namespace: ns}))
+	// Wait for the Ready condition to appear with status=False and observedGeneration set.
+	require.NoError(t, waitForConditionWithGeneration(ctx, t, k8sClient, crGVK,
+		types.NamespacedName{Name: "lifecycle-instance", Namespace: ns}, "Ready", "False", 15*time.Second))
 
 	// Read the instance and extract the Ready condition.
 	obj := &unstructured.Unstructured{}
@@ -233,8 +235,8 @@ func TestObservedState_SelfReferenceConditionLifecycle(t *testing.T) {
 		}))
 
 	// Wait for the condition to become status="True".
-	require.NoError(t, waitForConditionStatus(ctx, k8sClient, crGVK,
-		types.NamespacedName{Name: "lifecycle-instance", Namespace: ns}, "Ready", "True"))
+	require.NoError(t, waitForConditionStatus(ctx, t, k8sClient, crGVK,
+		types.NamespacedName{Name: "lifecycle-instance", Namespace: ns}, "Ready", "True", 15*time.Second))
 
 	// Read the condition again and assert lastTransitionTime is AFTER T1.
 	obj2 := &unstructured.Unstructured{}
@@ -414,9 +416,9 @@ func TestObservedState_ConditionSugarSelfReference(t *testing.T) {
 	require.NoError(t, waitForGraphReady(ctx, k8sClient,
 		types.NamespacedName{Name: "test-condition-sugar-selfref", Namespace: ns}))
 
-	// Wait for settle.
-	require.NoError(t, waitForSettle(ctx, k8sClient, crGVK,
-		types.NamespacedName{Name: "sugar-instance", Namespace: ns}))
+	// Wait for the Ready condition to appear with status=True and observedGeneration set.
+	require.NoError(t, waitForConditionWithGeneration(ctx, t, k8sClient, crGVK,
+		types.NamespacedName{Name: "sugar-instance", Namespace: ns}, "Ready", "True", 15*time.Second))
 
 	// Read the instance and verify condition fields.
 	obj := &unstructured.Unstructured{}
@@ -668,9 +670,10 @@ func TestObservedState_DynamicNameSelfReference(t *testing.T) {
 	require.NoError(t, waitForGraphReady(ctx, k8sClient,
 		types.NamespacedName{Name: "test-dynname-selfref", Namespace: ns}))
 
-	// Wait for the dynamically-named resource to settle.
-	require.NoError(t, waitForSettle(ctx, k8sClient, crGVK,
-		types.NamespacedName{Name: "dynamic-widget", Namespace: ns}))
+	// Wait for the dynamically-named resource's self-reference to resolve.
+	require.NoError(t, waitForField(ctx, k8sClient, crGVK,
+		types.NamespacedName{Name: "dynamic-widget", Namespace: ns},
+		[]string{"status", "observedGen"}, "1", 15*time.Second))
 
 	// Read the instance by its dynamic name and verify self-reference resolved.
 	obj := &unstructured.Unstructured{}
@@ -758,10 +761,6 @@ func TestObservedState_StateMachineTransition(t *testing.T) {
 	require.NoError(t, waitForField(ctx, k8sClient, crGVK,
 		types.NamespacedName{Name: "machine-instance", Namespace: ns},
 		[]string{"status", "phase"}, "Running"))
-
-	// Wait for settle to confirm no further transitions.
-	require.NoError(t, waitForSettle(ctx, k8sClient, crGVK,
-		types.NamespacedName{Name: "machine-instance", Namespace: ns}))
 
 	// Final assertion: read and confirm terminal state.
 	obj := &unstructured.Unstructured{}
