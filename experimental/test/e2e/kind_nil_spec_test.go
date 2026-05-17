@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -72,11 +73,14 @@ func TestStdlibKindNilSpec(t *testing.T) {
 	require.NoError(t, k8sClient.Create(ctx, instance))
 	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), instance) })
 
-	// Phase 4: Verify the Kind resource itself becomes ready (status subresource works).
-	// The Kind controller writes status.ready + status.items to the Kind resource.
-	t.Log("waiting for Kind to report ready...")
+	// Phase 4: Verify the Kind resource gets conditions hoisted from its controller Graph.
+	// The kindConditions node writes Compiled/Ready conditions to the Kind resource.
+	t.Log("waiting for Kind to report Compiled=True...")
 	kindKey := types.NamespacedName{Name: "clustermarker", Namespace: "kro-system"}
-	require.NoError(t, waitForResource(ctx, k8sClient, kindKey, kind, stdlibReconcileTimeout))
+	require.NoError(t, waitForConditionStatus(ctx, t, k8sClient,
+		schema.GroupVersionKind{Group: "experimental.kro.run", Version: "v1alpha1", Kind: "Kind"},
+		kindKey, "Compiled", "True", stdlibReconcileTimeout),
+		"Kind should have Compiled=True")
 
 	t.Log("Kind with nil spec works: schema compiled, CRD created, instance accepted")
 }
