@@ -42,72 +42,76 @@ func (r *GraphReconciler) reconcileDelete(ctx context.Context, graph *unstructur
 
 	candidates := r.collectTeardownKeys(ctx, cluster, graph, revisions)
 
-	teardownDAGs, teardownEval, teardownCompileErr, err := r.compileTeardownDAG(ctx, graph, revisions)
-	if err != nil {
-		return ctrl.Result{RequeueAfter: systemErrorRequeueInterval}, nil
-	}
+	if len(candidates) > 0 {
+		teardownDAGs, teardownEval, teardownCompileErr, err := r.compileTeardownDAG(ctx, graph, revisions)
+		if err != nil {
+			return ctrl.Result{RequeueAfter: systemErrorRequeueInterval}, nil
+		}
 
-	// Build a minimal instanceState for advanceFinalization.
-	rs := newReconcileScope(graph, nil, r.Metrics)
-	teardownState := &instanceState{}
+		// Build a minimal instanceState for advanceFinalization.
+		rs := newReconcileScope(graph, nil, r.Metrics)
+		teardownState := &instanceState{}
 
-	// -----------------------------------------------------------------------
-	// Delegate to pruneResources: all keys are candidates, currentKeys empty.
-	// Teardown skips identity-label verification (checkIdentityLabels=false).
-	// -----------------------------------------------------------------------
-	pr := cluster.pruneResources(ctx, rs, candidates, nil, teardownDAGs, teardownEval, teardownState, false)
+		// -----------------------------------------------------------------------
+		// Delegate to pruneResources: all keys are candidates, currentKeys empty.
+		// Teardown skips identity-label verification (checkIdentityLabels=false).
+		// -----------------------------------------------------------------------
+		pr := cluster.pruneResources(ctx, rs, candidates, nil, teardownDAGs, teardownEval, teardownState, false)
 
-	// Verify deleted resources are gone — only check keys with pruneDeleted outcome.
-	for _, a := range candidates {
-		if a.Key == "" {
-			continue
+		// Verify deleted resources are gone — only check keys with pruneDeleted outcome.
+		for _, a := range candidates {
+			if a.Key == "" {
+				continue
+			}
+			// Only verify template resources that were actually deleted.
+			outcome, hasOutcome := pr.Outcomes[a.Key]
+			if a.NodeType == graphpkg.NodeTypePatch {
+				continue // patches are released, not deleted
+			}
+			if hasOutcome && outcome != pruneDeleted {
+				continue // not deleted — skip verification
+			}
+			if !hasOutcome {
+				// No outcome recorded — may have been deleted. Verify.
+			}
+			check, _, ok := unstructuredFromKey(a.Key)
+			if !ok {
+				continue
+			}
+			if err := cluster.reader.Get(ctx, client.ObjectKeyFromObject(check), check); err == nil {
+				logger.V(1).Info("waiting for managed resource to be deleted", "key", a.Key)
+				return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+			}
 		}
-		// Only verify template resources that were actually deleted.
-		outcome, hasOutcome := pr.Outcomes[a.Key]
-		if a.NodeType == graphpkg.NodeTypePatch {
-			continue // patches are released, not deleted
-		}
-		if hasOutcome && outcome != pruneDeleted {
-			continue // not deleted — skip verification
-		}
-		if !hasOutcome {
-			// No outcome recorded — may have been deleted. Verify.
-		}
-		check, _, ok := unstructuredFromKey(a.Key)
-		if !ok {
-			continue
-		}
-		if err := cluster.reader.Get(ctx, client.ObjectKeyFromObject(check), check); err == nil {
-			logger.V(1).Info("waiting for managed resource to be deleted", "key", a.Key)
-			return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
-		}
-	}
 
-	// If any resource deletion was blocked, surface each distinct reason.
-	if len(pr.BlockedReasons) > 0 {
-		logger.Info("teardown blocked", "reasons", pr.BlockedReasons)
-		nodeErrors := append([]string{}, pr.BlockedReasons...)
-		if teardownCompileErr != nil {
-			nodeErrors = append(nodeErrors,
-				fmt.Sprintf("active revision compile failed: %s", teardownCompileErr))
+		// If any resource deletion was blocked, surface each distinct reason.
+		if len(pr.BlockedReasons) > 0 {
+			logger.Info("teardown blocked", "reasons", pr.BlockedReasons)
+			nodeErrors := append([]string{}, pr.BlockedReasons...)
+			if teardownCompileErr != nil {
+				nodeErrors = append(nodeErrors,
+					fmt.Sprintf("active revision compile failed: %s", teardownCompileErr))
+			}
+			if statusErr := r.updateStatus(ctx, graph, &reconcileState{
+				compiled:    true,
+				planSummary: PlanSummary{HasBlocked: true},
+				nodeErrors:  nodeErrors,
+				nodeNotes:   pr.Notes,
+			}); statusErr != nil {
+				logger.Error(statusErr, "updating status during teardown")
+			}
+			return ctrl.Result{RequeueAfter: systemErrorRequeueInterval}, nil
 		}
-		if statusErr := r.updateStatus(ctx, graph, &reconcileState{
-			compiled:    true,
-			planSummary: PlanSummary{HasBlocked: true},
-			nodeErrors:  nodeErrors,
-			nodeNotes:   pr.Notes,
-		}); statusErr != nil {
-			logger.Error(statusErr, "updating status during teardown")
+		// Log FinalizerSkipped notes.
+		for _, note := range pr.Notes {
+			logger.Info("teardown note", "note", note)
 		}
-		return ctrl.Result{RequeueAfter: systemErrorRequeueInterval}, nil
-	}
-	// Log FinalizerSkipped notes.
-	for _, note := range pr.Notes {
-		logger.Info("teardown note", "note", note)
-	}
 
-	if pr.Err != nil {
-		return ctrl.Result{}, pr.Err
+		if pr.Err != nil {
+			return ctrl.Result{}, pr.Err
+		}
+	} else {
+		logger.Info("no managed resources to tear down, removing finalizer")
 	}
 
 	// Delete all GraphRevisions.

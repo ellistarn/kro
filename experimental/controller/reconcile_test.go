@@ -14,7 +14,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/ellistarn/kro/experimental/controller/compiler"
 	dagpkg "github.com/ellistarn/kro/experimental/controller/dag"
@@ -1825,6 +1830,75 @@ func TestLazyDepOptionalScope_AbsentReturnsDefault(t *testing.T) {
 	replicasVal, err := compiled.Eval("deploy.?status.?availableReplicas.orValue(0)", eval.scope)
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), replicasVal, "?.orValue(0) on absent lazy dep should return 0")
+}
+
+// ---------------------------------------------------------------------------
+// Deletion — zero-candidates finalizer removal
+// ---------------------------------------------------------------------------
+
+// TestReconcileDelete_NoCandidates_RemovesFinalizer proves that when a Graph
+// is deleting but has no revisions and no managed resources (zero teardown
+// candidates), reconcileDelete skips the teardown DAG compilation and
+// immediately removes the finalizer. This prevents a Graph that never
+// compiled from getting stuck with a finalizer forever.
+func TestReconcileDelete_NoCandidates_RemovesFinalizer(t *testing.T) {
+	scheme := runtime.NewScheme()
+	// Build a Graph with the finalizer set and a deletion timestamp.
+	graph := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "experimental.kro.run/v1alpha1",
+		"kind":       "Graph",
+		"metadata": map[string]any{
+			"name":              "never-compiled",
+			"namespace":         "default",
+			"finalizers":        []any{finalizer},
+			"deletionTimestamp": "2024-01-01T00:00:00Z",
+			"resourceVersion":   "1",
+		},
+		"spec": map[string]any{
+			"nodes": []any{
+				map[string]any{
+					"id": "cm",
+					"template": map[string]any{
+						"apiVersion": "v1",
+						"kind":       "ConfigMap",
+						"metadata":   map[string]any{"name": "test"},
+					},
+				},
+			},
+		},
+	}}
+
+	// Fake client: List returns empty (no revisions, no managed resources),
+	// Update succeeds (finalizer removal).
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				// Return empty list — no revisions, no managed resources.
+				return nil
+			},
+			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				// Capture the updated object to verify finalizer removal.
+				u := obj.(*unstructured.Unstructured)
+				graph.Object = u.Object
+				return nil
+			},
+		}).
+		Build()
+
+	r := &GraphReconciler{
+		Client: fakeClient,
+		Caches: newInstanceMap(),
+	}
+
+	result, err := r.reconcileDelete(context.Background(), graph)
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, result, "should return zero result (no requeue)")
+
+	// The finalizer must be removed.
+	finalizers := graph.GetFinalizers()
+	assert.NotContains(t, finalizers, finalizer,
+		"finalizer should be removed when there are no teardown candidates")
 }
 
 // TestLazyDepOptionalScope_PresentReturnsRealData proves that when a lazy
