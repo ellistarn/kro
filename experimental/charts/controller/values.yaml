@@ -1,4 +1,5 @@
-image: ko://github.com/ellistarn/kro/experimental/cmd
+# image must be supplied at install time (e.g. --set image=<registry>/<repo>:<tag>)
+image: ""
 command: []
 args: []
 env: []
