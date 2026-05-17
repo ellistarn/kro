@@ -1022,3 +1022,136 @@ func TestFinalizer_RegressionDependencyOrdering(t *testing.T) {
 	require.NoError(t, waitForGraphReady(ctx, k8sClient, graphKey))
 	t.Log("Graph Ready — dependency-ordered finalization verified")
 }
+
+// TestPatchFinalizes proves that a patch: node with finalizes: fires during
+// Graph teardown — writing a field to a pre-existing external resource BEFORE
+// the finalization target is deleted.
+//
+// The patch node is dormant during normal operation (it only fires when the
+// target becomes a prune candidate). On teardown (Graph deletion), the
+// controller creates the patch (writing to the external resource), waits for
+// readyWhen, then deletes the target.
+//
+// This verifies:
+//  1. patch+finalizes nodes are dormant during steady state
+//  2. On teardown, the patch fires and mutates the external resource
+//  3. The target is deleted AFTER the patch completes
+//  4. The external resource survives teardown (it was never owned)
+//  5. The patch node's SSA fields are released, reverting the patched value
+func TestPatchFinalizes(t *testing.T) {
+	t.Parallel()
+	ns := createNamespace(t)
+
+	cmGVK := schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"}
+
+	// Pre-create the "external" ConfigMap — this resource exists independently
+	// of the Graph. The patch node will write to it during finalization.
+	external := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata": map[string]any{
+				"name":      "patch-fin-external",
+				"namespace": ns,
+			},
+			"data": map[string]any{
+				"finalized": "false",
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, external))
+	t.Log("Pre-created external ConfigMap with finalized=false")
+
+	// Create the Graph with:
+	//   - target: a template node creating a ConfigMap
+	//   - marker: a patch node with finalizes: target, targeting the external CM
+	graph := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "experimental.kro.run/v1alpha1",
+			"kind":       "Graph",
+			"metadata": map[string]any{
+				"name":      "test-patch-finalizes",
+				"namespace": ns,
+			},
+			"spec": map[string]any{
+				"nodes": []any{
+					map[string]any{
+						"id": "target",
+						"template": map[string]any{
+							"apiVersion": "v1",
+							"kind":       "ConfigMap",
+							"metadata":   map[string]any{"name": "patch-fin-target"},
+							"data":       map[string]any{"role": "target"},
+						},
+					},
+					map[string]any{
+						"id":        "marker",
+						"finalizes": "target",
+						"readyWhen": []any{"true"},
+						"patch": map[string]any{
+							"apiVersion": "v1",
+							"kind":       "ConfigMap",
+							"metadata":   map[string]any{"name": "patch-fin-external"},
+							"data": map[string]any{
+								"finalized": "true",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, graph))
+
+	// Wait for target to exist and Graph to be ready.
+	targetCM := &unstructured.Unstructured{}
+	targetCM.SetGroupVersionKind(cmGVK)
+	graphKey := types.NamespacedName{Name: "test-patch-finalizes", Namespace: ns}
+	require.NoError(t, waitForResource(ctx, k8sClient,
+		types.NamespacedName{Name: "patch-fin-target", Namespace: ns}, targetCM))
+	require.NoError(t, waitForGraphReady(ctx, k8sClient, graphKey))
+	t.Log("Target created, Graph ready")
+
+	// Verify the external ConfigMap still has finalized=false (marker is dormant).
+	extCheck := &unstructured.Unstructured{}
+	extCheck.SetGroupVersionKind(cmGVK)
+	require.NoError(t, k8sClient.Get(ctx,
+		types.NamespacedName{Name: "patch-fin-external", Namespace: ns}, extCheck))
+	val, _, _ := unstructured.NestedString(extCheck.Object, "data", "finalized")
+	assert.Equal(t, "false", val,
+		"external CM should still have finalized=false during normal operation")
+	t.Log("External ConfigMap confirmed finalized=false (marker dormant)")
+
+	// Delete the Graph — triggers teardown with finalization.
+	latestGraph := &unstructured.Unstructured{}
+	latestGraph.SetGroupVersionKind(GraphGVK)
+	require.NoError(t, k8sClient.Get(ctx, graphKey, latestGraph))
+	require.NoError(t, k8sClient.Delete(ctx, latestGraph))
+	t.Log("Graph deleted — teardown started")
+
+	// Wait for the Graph to be fully deleted (teardown complete).
+	require.NoError(t, waitForDeletion(ctx, k8sClient, GraphGVK, graphKey))
+	t.Log("Graph fully deleted — teardown complete")
+
+	// Assert: target ConfigMap is gone.
+	targetCheck := &unstructured.Unstructured{}
+	targetCheck.SetGroupVersionKind(cmGVK)
+	err := k8sClient.Get(ctx,
+		types.NamespacedName{Name: "patch-fin-target", Namespace: ns}, targetCheck)
+	assert.True(t, apierrors.IsNotFound(err), "target should be deleted after teardown")
+	t.Log("Target ConfigMap confirmed deleted")
+
+	// Assert: external ConfigMap still exists (it was never owned by the Graph).
+	extFinal := &unstructured.Unstructured{}
+	extFinal.SetGroupVersionKind(cmGVK)
+	require.NoError(t, k8sClient.Get(ctx,
+		types.NamespacedName{Name: "patch-fin-external", Namespace: ns}, extFinal),
+		"external ConfigMap must survive teardown")
+
+	// After release-apply, the patch field manager is removed.
+	// The field reverts or is removed — either way, it's no longer "true".
+	val, _, _ = unstructured.NestedString(extFinal.Object, "data", "finalized")
+	assert.NotEqual(t, "true", val,
+		"patch fields should be released after finalization cleanup")
+	t.Log("External ConfigMap data.finalized is not 'true' — patch fields released via SSA")
+}

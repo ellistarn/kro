@@ -115,6 +115,41 @@ func (c *clusterAccess) deleteByKeys(ctx context.Context, keys []string) {
 	}
 }
 
+// cleanupFinalizationChildren dispatches cleanup for finalization children by
+// node type: template children are deleted, patch children are release-applied
+// (releasing SSA field ownership so the fields persist but kro no longer claims them).
+func (c *clusterAccess) cleanupFinalizationChildren(ctx context.Context, children []finalizationChild, fieldOwner client.FieldOwner) {
+	logger := log.FromContext(ctx)
+	for _, child := range children {
+		switch child.NodeType {
+		case graphpkg.NodeTypePatch:
+			gvk, nn := parseResourceKey(child.Key)
+			if gvk.Kind == "" {
+				continue
+			}
+			if _, err := releaseApply(ctx, c.client, gvk, nn.Namespace, nn.Name, fieldOwner, false); err != nil {
+				if client.IgnoreNotFound(err) != nil {
+					logger.V(1).Info("finalizer patch release failed", "key", child.Key, "error", err)
+				}
+			} else {
+				logger.V(1).Info("released finalizer patch fields", "key", child.Key)
+			}
+		default:
+			finDel, _, ok := unstructuredFromKey(child.Key)
+			if !ok {
+				continue
+			}
+			if delErr := c.client.Delete(ctx, finDel); delErr != nil {
+				if client.IgnoreNotFound(delErr) != nil {
+					logger.V(1).Info("finalizer resource cleanup failed", "key", child.Key, "error", delErr)
+				}
+			} else {
+				logger.V(1).Info("cleaned up finalizer resource", "key", child.Key)
+			}
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Apply / SSA
 // ---------------------------------------------------------------------------

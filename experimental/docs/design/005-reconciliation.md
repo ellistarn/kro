@@ -161,13 +161,12 @@ The sequence within a prune walk:
    is still fully operational, no `metadata.deletionTimestamp`. This matters: setting
    `deletionTimestamp` can trigger the target's own controller to start destroying underlying
    infrastructure before the finalizer resource has a chance to act. The finalizer resource's key is
-   added to the applied set.
+    added to the applied set.
 2. The finalizer resource reaches readyWhen. If multiple finalizer nodes target the same resource,
    dependencies among them determine ordering — all must be Ready before proceeding.
 3. The controller issues DELETE on the target.
-4. The prune walk continues. The finalizer resources are in the applied set but not in the desired
-   state — they are prune candidates. The walk picks them up and deletes them in reverse dependency
-   order.
+4. Finalizer resources are cleaned up. `template:`-type finalizer nodes are deleted; `patch:`-type
+   finalizer nodes release their fields (SSA field manager removed).
 
 Finalization state is fully recoverable from spec, applied set, and cluster state — no state machine
 needed. On crash, the next reconcile re-derives position: the applied set identifies which finalizer

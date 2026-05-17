@@ -122,9 +122,9 @@ func (c *clusterAccess) pruneResources(
 		DAGs:                dags,
 	}
 
-	// deferredDeletes collects finalizer resource keys whose targets were
+	// deferredDeletes collects finalizer children whose targets were
 	// successfully deleted in this walk. Processed after the walk completes.
-	var deferredDeletes []string
+	var deferredDeletes []finalizationChild
 
 	for _, candidate := range ordered {
 		if candidate.Key == "" {
@@ -145,8 +145,8 @@ func (c *clusterAccess) pruneResources(
 		if len(cr.Notes) > 0 {
 			result.Notes = append(result.Notes, cr.Notes...)
 		}
-		if len(cr.ChildKeysToDelete) > 0 {
-			deferredDeletes = append(deferredDeletes, cr.ChildKeysToDelete...)
+		if len(cr.ChildrenToCleanup) > 0 {
+			deferredDeletes = append(deferredDeletes, cr.ChildrenToCleanup...)
 		}
 		if cr.Err != nil {
 			result.Err = cr.Err
@@ -160,18 +160,18 @@ func (c *clusterAccess) pruneResources(
 	if len(deferredDeletes) > 1 {
 		keyPosition, maxPos := buildKeyPositionMap(dags, rs.namespace, c.scope)
 		sort.Slice(deferredDeletes, func(i, j int) bool {
-			pi, oki := keyPosition[deferredDeletes[i]]
+			pi, oki := keyPosition[deferredDeletes[i].Key]
 			if !oki {
 				pi = maxPos + 1
 			}
-			pj, okj := keyPosition[deferredDeletes[j]]
+			pj, okj := keyPosition[deferredDeletes[j].Key]
 			if !okj {
 				pj = maxPos + 1
 			}
 			return pi > pj
 		})
 	}
-	c.deleteByKeys(ctx, deferredDeletes)
+	c.cleanupFinalizationChildren(ctx, deferredDeletes, opts.FieldOwner)
 
 	return result
 }
@@ -182,22 +182,22 @@ func (c *clusterAccess) pruneResources(
 
 // pruneOpts carries read-only context from finalization into pruneCandidate.
 type pruneOpts struct {
-	ProtectedKeys       map[string]bool     // keys to skip (active finalization children)
-	CompletedTargets    map[string]bool     // targets whose finalization is done
-	ChildKeysToCleanup  map[string][]string // target key → child keys to delete after target
-	CheckIdentityLabels bool                // prune mode (true) vs teardown mode (false)
-	FieldOwner          client.FieldOwner   // field manager name for this graph
-	KeyToNodeID         map[string]string   // resource key → DAG node ID
-	DAGs                []*dagpkg.DAG       // all DAGs for finalizer lookup
+	ProtectedKeys       map[string]bool              // keys to skip (active finalization children)
+	CompletedTargets    map[string]bool              // targets whose finalization is done
+	ChildKeysToCleanup  map[string][]finalizationChild // target key → children to clean up after target
+	CheckIdentityLabels bool                         // prune mode (true) vs teardown mode (false)
+	FieldOwner          client.FieldOwner            // field manager name for this graph
+	KeyToNodeID         map[string]string            // resource key → DAG node ID
+	DAGs                []*dagpkg.DAG                // all DAGs for finalizer lookup
 }
 
 // pruneCandidateResult carries the outcome of processing a single candidate.
 type pruneCandidateResult struct {
-	Outcome         pruneOutcome // 0 means no outcome recorded (patch release, skipped internally)
-	BlockedReasons  []string
-	Notes           []string
-	ChildKeysToDelete []string // finalization children to clean up
-	Err             error      // hard API error — caller should abort
+	Outcome            pruneOutcome // 0 means no outcome recorded (patch release, skipped internally)
+	BlockedReasons     []string
+	Notes              []string
+	ChildrenToCleanup  []finalizationChild // finalization children to clean up
+	Err                error               // hard API error — caller should abort
 }
 
 // pruneCandidate processes a single prune candidate: dispatches by node type
@@ -279,11 +279,11 @@ func (c *clusterAccess) pruneCandidateTemplate(
 		}
 	} else {
 		logger.Info("pruned resource", "key", key)
-		var childKeys []string
+		var children []finalizationChild
 		if ck, ok := opts.ChildKeysToCleanup[key]; ok {
-			childKeys = ck
+			children = ck
 		}
-		return pruneCandidateResult{Outcome: pruneDeleted, ChildKeysToDelete: childKeys}
+		return pruneCandidateResult{Outcome: pruneDeleted, ChildrenToCleanup: children}
 	}
 	return pruneCandidateResult{}
 }
@@ -301,7 +301,7 @@ func (c *clusterAccess) pruneCandidateNotFound(
 
 	// Target absent — clean up finalization children if mid-finalization.
 	if childKeys, ok := opts.ChildKeysToCleanup[key]; ok {
-		cr.ChildKeysToDelete = childKeys
+		cr.ChildrenToCleanup = childKeys
 	}
 
 	// Emit FinalizerSkipped note if this target had finalizers.
