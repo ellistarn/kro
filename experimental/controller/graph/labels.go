@@ -168,10 +168,14 @@ func HasGraphIdentityLabels(labels map[string]string, graphName, namespace strin
 	return false
 }
 
-// HasOtherGraphIdentityLabel checks if a resource's labels contain any
-// identity labels from a DIFFERENT graph than the specified one. Used by
-// the kro label check before applying a Template node — if present,
-// another kro Graph manages this resource.
+// HasOtherGraphIdentityLabel checks if a resource's labels contain a
+// TEMPLATE identity label from a DIFFERENT graph than the specified one.
+// Used by the kro label check before applying a Template node — if present,
+// another kro Graph owns this resource's lifecycle.
+//
+// Only foreign template labels constitute a conflict. Patch labels from
+// other graphs are the expected steady state: patch nodes write status back
+// to resources owned by another graph's template node.
 //
 // Label keys are compared case-insensitively. stamping writes lowercase keys
 // (DNS-1123 requires lowercase), but the Kubernetes API preserves whatever
@@ -188,7 +192,7 @@ func HasOtherGraphIdentityLabel(labels map[string]string, myGraphName, myNamespa
 		// This is an identity label. Check if it belongs to a different graph.
 		if !strings.HasSuffix(lowerKey, mySuffix) {
 			// Different graph. Extract graph name for the error message.
-			if val == NodeTypeTemplate.String() || val == NodeTypePatch.String() {
+			if val == NodeTypeTemplate.String() {
 				return graphNameFromLabel(lowerKey), true
 			}
 		}

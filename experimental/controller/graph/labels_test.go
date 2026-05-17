@@ -127,14 +127,23 @@ func TestHasOtherGraphIdentityLabel(t *testing.T) {
 	assert.True(t, found)
 	assert.Equal(t, "other-app", otherGraph)
 
-	// Resource with both our label and another graph's label — conflict
+	// Resource with both our label and another graph's template label — conflict
 	labels3 := map[string]string{
 		"deploy.my-app.default.internal.kro.run/type":    "template",
-		"deploy.other-app.default.internal.kro.run/type": "patch",
+		"deploy.other-app.default.internal.kro.run/type": "template",
 	}
 	otherGraph, found = HasOtherGraphIdentityLabel(labels3, "my-app", "default")
 	assert.True(t, found)
 	assert.Equal(t, "other-app", otherGraph)
+
+	// Resource with both our label and another graph's patch label — no conflict
+	// (patch labels from other graphs are expected steady state)
+	labels3patch := map[string]string{
+		"deploy.my-app.default.internal.kro.run/type":    "template",
+		"deploy.other-app.default.internal.kro.run/type": "patch",
+	}
+	_, found = HasOtherGraphIdentityLabel(labels3patch, "my-app", "default")
+	assert.False(t, found)
 
 	// No identity labels at all
 	labels4 := map[string]string{
