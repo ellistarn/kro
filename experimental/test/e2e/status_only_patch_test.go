@@ -41,15 +41,14 @@ func applySimpleAppAs(t *testing.T, ns, name, fieldManager string, spec map[stri
 	))
 }
 
-// TestPatch_StatusOnlyDoesNotClaimMainResource verifies that a patch node
+// TestPatch_StatusOnlyAlsoWritesIdentityLabels verifies that a patch node
 // containing only identity fields (apiVersion, kind, metadata) plus status
-// does NOT register a field manager on the main resource. This prevents
-// ownership conflicts when another graph also manages the same resource.
-//
-// Regression: before the fix, the kindStatus patch (which only writes
-// status) would SSA-apply identity fields to the main resource, causing
-// the kind controller's field manager to conflict with the parent graph.
-func TestPatch_StatusOnlyDoesNotClaimMainResource(t *testing.T) {
+// STILL registers a main-object field manager. This is required because
+// prepareObject stamps identity labels into metadata, and those labels must
+// be written via the main apply for deriveAppliedSet to discover patched
+// resources after restart. The cost of an extra main apply is negligible
+// compared to the correctness risk of missing identity labels.
+func TestPatch_StatusOnlyAlsoWritesIdentityLabels(t *testing.T) {
 	t.Parallel()
 	ns := createNamespace(t)
 
@@ -93,9 +92,9 @@ func TestPatch_StatusOnlyDoesNotClaimMainResource(t *testing.T) {
 	statusMap, _, _ := unstructured.NestedMap(check.Object, "status")
 	assert.Equal(t, "patched-status", statusMap["message"])
 
-	// 5. Verify that the graph's main field manager is NOT present — only the
-	//    status sub-manager should exist. The parent manager should still own
-	//    the main resource exclusively.
+	// 5. Verify that the graph's main field manager IS present (identity labels
+	//    are written via main apply) alongside the status sub-manager and the
+	//    parent manager.
 	graphManager := "status-only-patch." + ns + ".internal.kro.run"
 	statusManager := graphManager + ".status"
 
@@ -115,8 +114,8 @@ func TestPatch_StatusOnlyDoesNotClaimMainResource(t *testing.T) {
 		}
 	}
 
-	assert.False(t, hasGraphMainManager,
-		"status-only patch should NOT register a main-object field manager")
+	assert.True(t, hasGraphMainManager,
+		"status-only patch should register a main-object field manager for identity labels")
 	assert.True(t, hasGraphStatusManager,
 		"status-only patch should register a status sub-manager")
 	assert.True(t, hasParentManager,
