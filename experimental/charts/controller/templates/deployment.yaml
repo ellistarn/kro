@@ -18,7 +18,7 @@ spec:
       serviceAccountName: graph-controller
       containers:
         - name: controller
-          image: {{ .Values.image }}
+          image: {{ required "image is required (e.g. --set image=<registry>/<repo>:<tag>)" .Values.image }}
           {{- with .Values.command }}
           command: {{ toJson . }}
           {{- end }}
