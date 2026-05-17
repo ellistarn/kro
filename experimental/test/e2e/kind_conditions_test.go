@@ -19,7 +19,7 @@ import (
 // Kind status conditions tests
 //
 // The Kind resource's status conditions are hoisted from its underlying
-// controller Graph (kind-<name>). The kindConditions node at the top-level
+// controller Graph (kind.<name>). The kindConditions node at the top-level
 // kind Graph iterates over controller Graphs and forwards their Compiled
 // and Ready conditions onto the corresponding Kind resource.
 //
@@ -88,7 +88,7 @@ func TestKindStatusConditions(t *testing.T) {
 	require.NoError(t, waitForCRD(ctx, k8sClient, "condwidgets.test.stdlib.kro.run", stdlibCRDTimeout))
 
 	// Phase 3: Wait for Kind to receive conditions from its controller Graph.
-	// The kindConditions node hoists Compiled/Ready from the kind-condwidget Graph.
+	// The kindConditions node hoists Compiled/Ready from the kind.condwidget Graph.
 	kindKey := types.NamespacedName{Name: "condwidget", Namespace: "kro-system"}
 	t.Log("waiting for Kind Compiled=True condition...")
 	require.NoError(t, waitForConditionStatus(ctx, t, k8sClient, kindGVK, kindKey, "Compiled", "True", stdlibReconcileTimeout),
@@ -292,13 +292,13 @@ func TestKindConditionsDecoupledFromInstances(t *testing.T) {
 		types.NamespacedName{Name: "cd-inst-decouple", Namespace: "kro-system"}, cm, stdlibReconcileTimeout))
 
 	// Verify the per-instance Graph is NOT ready.
-	instanceGraphName := "kro-system-cd-inst-conddecouple"
+	instanceGraphName := "kind.conddecouple.kro-system-cd-inst"
 	require.NoError(t, waitForGraphReadyStatus(ctx, k8sClient,
 		types.NamespacedName{Name: instanceGraphName, Namespace: "kro-system"}, "Unknown", stdlibReconcileTimeout),
 		"per-instance Graph should be NotReady")
 
 	// The Kind resource MUST still show Ready=True — its conditions come from
-	// the controller Graph (kind-conddecouple), not from per-instance Graphs.
+	// the controller Graph (kind.conddecouple), not from per-instance Graphs.
 	kindKey := types.NamespacedName{Name: "conddecouple", Namespace: "kro-system"}
 	t.Log("verifying Kind is Ready despite instance not converging...")
 	require.NoError(t, waitForConditionStatus(ctx, t, k8sClient, kindGVK, kindKey, "Ready", "True", stdlibReconcileTimeout),
