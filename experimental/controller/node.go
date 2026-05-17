@@ -6,6 +6,8 @@ package graphcontroller
 import (
 	"context"
 	"fmt"
+	"reflect"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -327,6 +329,28 @@ func (c *clusterAccess) reconcileApply(ctx context.Context, rs *reconcileScope, 
 		return Applied{}, fmt.Errorf("%s %s: %w", nodeType, node.ID, err)
 	}
 
+	// Skip apply if the only differences from observed state are time.now()-derived
+	// timestamps. This prevents infinite reconcile loops when time.now() is used in
+	// raw value expressions (e.g. annotations with timestamps).
+	if len(eval.timeDeps) > 0 {
+		if observed, ok := eval.scope[node.ID].(map[string]any); ok {
+			if meta, _ := observed["metadata"].(map[string]any); meta != nil {
+				if rv, _ := meta["resourceVersion"].(string); rv != "" {
+					// Resource exists — check if apply is necessary.
+					if !isApplyNecessary(evalMap, observed, eval.timeDeps) {
+						logger.V(1).Info("skipping apply — only time.now() drift", "node", node.ID)
+						eval.markUpdated(node.ID, true)
+						return Applied{
+							Key:       resourceKeyFromObserved(observed),
+							NodeType:  nodeType,
+							HasStatus: evalMap["status"] != nil,
+						}, nil
+					}
+				}
+			}
+		}
+	}
+
 	applied, err := c.applySSA(ctx, rs, evalMap, node.ID, nodeType, eval.effectiveGeneration, node.Lifecycle.ForceApply())
 	if err != nil {
 		return Applied{}, err
@@ -448,4 +472,97 @@ func parseLabelSelector(sel map[string]any) labels.Selector {
 		return labels.Everything()
 	}
 	return labels.NewSelector().Add(reqs...)
+}
+
+// ---------------------------------------------------------------------------
+// Time-drift skip-apply
+// ---------------------------------------------------------------------------
+
+// isApplyNecessary reports whether evalMap differs from observed in any field
+// that isn't purely time.now() timestamp drift. Only fields present in evalMap
+// are checked (SSA only manages fields in the payload). timeDeps holds
+// dot-notation paths whose source expressions reference time.now().
+func isApplyNecessary(evalMap, observed map[string]any, timeDeps []string) bool {
+	tdSet := make(map[string]bool, len(timeDeps))
+	for _, p := range timeDeps {
+		tdSet[p] = true
+	}
+	return hasRealDiff(evalMap, observed, "", tdSet)
+}
+
+// hasRealDiff recursively compares desired against actual, returning true on
+// the first non-time difference found. Fields at paths in td are tolerated
+// when both values are valid RFC3339 timestamps (time.now() drift).
+func hasRealDiff(desired, actual map[string]any, prefix string, td map[string]bool) bool {
+	for k, dv := range desired {
+		path := prefix + k
+		av, exists := actual[k]
+		if !exists {
+			if td[path] {
+				continue
+			}
+			return true
+		}
+		switch dvt := dv.(type) {
+		case map[string]any:
+			avm, ok := av.(map[string]any)
+			if !ok {
+				return true
+			}
+			if hasRealDiff(dvt, avm, path+".", td) {
+				return true
+			}
+		case []any:
+			avs, ok := av.([]any)
+			if !ok || len(avs) != len(dvt) {
+				return true
+			}
+			for i := range dvt {
+				ep := fmt.Sprintf("%s.%d", path, i)
+				switch ed := dvt[i].(type) {
+				case map[string]any:
+					ea, ok := avs[i].(map[string]any)
+					if !ok {
+						return true
+					}
+					if hasRealDiff(ed, ea, ep+".", td) {
+						return true
+					}
+				default:
+					if !reflect.DeepEqual(dvt[i], avs[i]) {
+						if td[ep] && isTimestampDrift(dvt[i], avs[i]) {
+							continue
+						}
+						return true
+					}
+				}
+			}
+		default:
+			if !reflect.DeepEqual(dv, av) {
+				if td[path] && isTimestampDrift(dv, av) {
+					continue
+				}
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isTimestampDrift reports whether both values are valid RFC3339 timestamps.
+func isTimestampDrift(a, b any) bool {
+	as, aOk := a.(string)
+	bs, bOk := b.(string)
+	if !aOk || !bOk {
+		return false
+	}
+	_, aErr := time.Parse(time.RFC3339, as)
+	_, bErr := time.Parse(time.RFC3339, bs)
+	return aErr == nil && bErr == nil
+}
+
+// resourceKeyFromObserved constructs a resource key from observed state.
+func resourceKeyFromObserved(observed map[string]any) string {
+	obj := &unstructured.Unstructured{Object: observed}
+	return resourceKey(obj)
 }

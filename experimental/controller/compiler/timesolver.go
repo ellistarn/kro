@@ -236,6 +236,56 @@ func isTimeNowCall(e ast.Expr) bool {
 	return c.FunctionName() == "time.now" && len(c.Args()) == 0 && !c.IsMemberFunction()
 }
 
+// identifyVolatileExprs returns the set of expression strings whose ASTs contain
+// a call to time.now(). These expressions produce different outputs between
+// evaluations without any change in their inputs.
+func identifyVolatileExprs(checkedExprs map[string]*cel.Ast) map[string]bool {
+	result := make(map[string]bool)
+	for exprStr, checked := range checkedExprs {
+		if exprContainsTimeNow(checked.NativeRep().Expr()) {
+			result[exprStr] = true
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// exprContainsTimeNow recursively walks an AST node and returns true if any
+// sub-expression is a call to time.now().
+func exprContainsTimeNow(e ast.Expr) bool {
+	if e == nil {
+		return false
+	}
+	if isTimeNowCall(e) {
+		return true
+	}
+	switch e.Kind() {
+	case ast.CallKind:
+		call := e.AsCall()
+		if call.IsMemberFunction() && call.Target() != nil {
+			if exprContainsTimeNow(call.Target()) {
+				return true
+			}
+		}
+		for _, arg := range call.Args() {
+			if exprContainsTimeNow(arg) {
+				return true
+			}
+		}
+	case ast.ListKind:
+		for _, elem := range e.AsList().Elements() {
+			if exprContainsTimeNow(elem) {
+				return true
+			}
+		}
+	case ast.SelectKind:
+		return exprContainsTimeNow(e.AsSelect().Operand())
+	}
+	return false
+}
+
 // SolveTimeComparison evaluates a time comparison's threshold against the
 // current scope and returns how long until the comparison becomes true.
 // Returns 0 if the threshold is already past or evaluation fails.

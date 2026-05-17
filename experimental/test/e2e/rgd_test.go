@@ -706,7 +706,7 @@ func TestRGDLifecyclePort(t *testing.T) {
 	// Verify Deployment is cleaned up (L2 finalizer deletes it).
 	// Multi-level cascade cleanup can take longer under parallel test load.
 	require.NoError(t, waitForDeletion(ctx, k8sClient, deployGVK,
-		types.NamespacedName{Name: "deployment-test-instance-for-updates", Namespace: ns}))
+		types.NamespacedName{Name: "deployment-test-instance-for-updates", Namespace: ns}, 60*time.Second))
 	t.Log("Deployment deleted after instance deletion — cascade cleanup proved")
 
 	t.Log("RGD LIFECYCLE PORT PASSED: create → verify → update → converge → delete → cleanup")

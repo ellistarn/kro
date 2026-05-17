@@ -257,6 +257,16 @@ func (c *clusterAccess) reconcileForEach(ctx context.Context, rs *reconcileScope
 		if len(node.ReadyWhen) > 0 {
 			logger.V(1).Info("all forEach items ready", "node", node.ID)
 		}
+	} else if len(node.ReadyWhen) > 0 {
+		// Per-item gate path: readyWhen was stamped inline during the loop.
+		// Verify all items satisfied readyWhen before declaring the node ready.
+		for _, item := range allApplied {
+			if m, ok := item.(map[string]any); ok {
+				if ready, _ := m["__ready"].(bool); !ready {
+					return &nodeOutput{keys: keys}, ErrWaitingForReadiness
+				}
+			}
+		}
 	}
 
 	return &nodeOutput{keys: keys}, nil

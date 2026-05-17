@@ -297,8 +297,12 @@ func waitForObservedGeneration(ctx context.Context, c client.Client, key types.N
 // resource has been deleted and you need to wait for teardown to complete.
 // Unlike waitForAbsence (which proves something never appears), this observes
 // the completion of a deletion that is expected to succeed.
-func waitForDeletion(ctx context.Context, c client.Client, gvk schema.GroupVersionKind, key types.NamespacedName) error {
-	return wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 30*time.Second, true, func(ctx context.Context) (bool, error) {
+func waitForDeletion(ctx context.Context, c client.Client, gvk schema.GroupVersionKind, key types.NamespacedName, timeout ...time.Duration) error {
+	t := 30 * time.Second
+	if len(timeout) > 0 {
+		t = timeout[0]
+	}
+	return wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, t, true, func(ctx context.Context) (bool, error) {
 		obj := &unstructured.Unstructured{}
 		obj.SetGroupVersionKind(gvk)
 		err := c.Get(ctx, key, obj)
