@@ -53,7 +53,7 @@ determined by the dependencies between nodes.
 
 #### id
 
-A string that identifies the node within the Graph's scope. Other nodes can reference this id CEL
+A string that identifies the node within the Graph's scope. Other nodes can reference this id in CEL
 expressions. Must be an alphanumeric string (case-insensitive) and unique within the Graph's scope.
 
 #### type
@@ -154,7 +154,7 @@ A node's type is the keyword it declares. Six types exist:
 
 Dependencies between nodes are defined by CEL expressions. If node B's template contains
 `${A.metadata.name}`, B has a dependency on A. Each CEL expression creates an edge in the graph. A
-node cannot be evaluated until all of its edges can been evaluated.
+node cannot be evaluated until all of its edges can be evaluated.
 
 ### Soft Dependencies
 
@@ -268,7 +268,7 @@ depend on excluded nodes are also excluded.
 The `readyWhen` modifier is a list of boolean CEL expressions. When all are true, the node is ready.
 If readyWhen is not defined, the node is ready as soon as it is evaluated. readyWhen is a health
 signal — it does not gate dependents. Dependents proceed regardless of readyWhen. Use propagateWhen
-to gate dependents on readiness. The graph is considered ready once all of its nodes are ready.
+to gate dependents on readiness.
 
 Each node exposes its readiness through a `.ready()` CEL function as a convenience for other nodes.
 
@@ -278,6 +278,42 @@ Each node exposes its readiness through a `.ready()` CEL function as a convenien
     - ${deployment.status.availableReplicas > 0}
   template: ...
 ```
+
+#### Graph Readiness
+
+The Graph is Ready when all of its nodes are ready. This is the mechanism by which external tools —
+Helm, ArgoCD, `kubectl wait` — know when a Graph has converged. Tools block on the Graph's `Ready`
+condition. Authors control what "converged" means by choosing which nodes carry `readyWhen`.
+
+A Graph deploying a Deployment should declare `readyWhen` on the Deployment so Helm knows when the
+rollout is complete. A Graph managing an unbounded collection (a controller watching instances) should
+not put `readyWhen` on the forEach — the collection is never "done," and new items can appear at any
+time. The Graph's readiness reflects its own convergence, not the convergence of things it manages.
+
+Put `readyWhen` on resources whose convergence defines "done" for the Graph's purpose:
+
+```yaml
+# Graph is Ready once the Deployment has available replicas.
+# Helm will wait for this before proceeding with the next chart.
+spec:
+  nodes:
+    - id: deployment
+      readyWhen:
+        - ${deployment.status.availableReplicas > 0}
+      template:
+        apiVersion: apps/v1
+        kind: Deployment
+        ...
+    - id: service
+      template:
+        apiVersion: v1
+        kind: Service
+        ...
+```
+
+The Service has no `readyWhen` — its existence is sufficient. The Deployment's `readyWhen` is what
+blocks the Graph's `Ready` condition. The author made a choice: "done" means "pods are serving."
+If a node's convergence should not block the Graph's readiness, omit readyWhen.
 
 ### propagateWhen
 
@@ -564,7 +600,7 @@ no inner `${}` is evaluated immediately as CEL in the current scope.
 It's common to combine nested graphs and expression nesting with `watch`, `forEach`, `ref`, to create a
 nested scope that evaluates in isolation. Below, the parent graph intentionally does not directly
 reference parent's forEach `ns`, except by name, as any change to `ns` would cause the nested graph
-to be mutated. Instead, the nested graph is configured to directly refence the `ns` itself within
+to be mutated. Instead, the nested graph is configured to directly reference the `ns` itself within
 its own scope.
 
 ```yaml
@@ -606,7 +642,7 @@ its own scope.
 
 ## Status
 
-The Graph's status exposes the the Graph's current state. Status conditions exist to make the
+The Graph's status exposes the Graph's current state. Status conditions exist to make the
 operator's mental model correct — they answer "is this Graph healthy, and if not, who needs to act?"
 
 Two failure domains require different responses: a user error is a Graph developer problem (fix the
@@ -635,9 +671,11 @@ fixes the spec.
 | `DependencyError`  | Nodes form a circular dependency |
 | `DeclarationError` | Node declaration is malformed    |
 
-**`Ready`** — a rollup of node evaluations. Each reason maps to the node state blocking convergence.
-`True` means converged. `Unknown` means converging — the controller is making progress and no
-intervention is needed. `False` means stuck — something requires operator action.
+**`Ready`** — a rollup of node readyWhen evaluations. Each reason maps to the node state blocking
+convergence. `True` means all nodes with readyWhen are satisfied and all resources are reconciled.
+`Unknown` means converging — the controller is making progress and no intervention is needed.
+`False` means stuck — something requires operator action. Authors control what blocks this condition
+by choosing which nodes carry readyWhen (see § readyWhen > Graph Readiness).
 
 Alarm on Ready `False` or `Unknown` persisting beyond a reasonable convergence window. Since
 Compiled rolls up into Ready (as `NotCompiled`), a single alarm on the Ready condition covers both
