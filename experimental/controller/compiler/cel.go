@@ -75,6 +75,12 @@ type CompiledGraph struct {
 	// `time.now() - timestamp(X) >= duration('2h')`). Used at eval time to
 	// compute precise requeue durations when such expressions return false.
 	TimeComparisons map[string]*TimeComparison
+
+	// VolatileExprs is the set of expression strings whose ASTs contain a
+	// call to time.now(). Used by the evaluator to detect fields that produce
+	// different outputs on every reconcile (without any input change), enabling
+	// skip-apply when only volatile fields drift.
+	VolatileExprs map[string]bool
 }
 
 // Env returns the CEL environment for use in tests and downstream compilation.
@@ -315,6 +321,9 @@ func CompileGraphSpec(spec *graph.GraphSpec, typeInfo *TypeSource) (*CompiledGra
 	// Phase 5: analyze time comparison patterns for precise requeue scheduling.
 	timeComparisons := analyzeTimeComparisons(env, exprResult.checkedASTs)
 
+	// Phase 5b: identify volatile expressions for idempotent-apply optimization.
+	volatileExprs := identifyVolatileExprs(exprResult.checkedASTs)
+
 	return &CompiledGraph{
 		env:             env,
 		Programs:        exprResult.programs,
@@ -324,6 +333,7 @@ func CompileGraphSpec(spec *graph.GraphSpec, typeInfo *TypeSource) (*CompiledGra
 		CollectionIDs:   collectionIDs,
 		ResourceSchemas: typeInfo.ResourceSchemas,
 		TimeComparisons: timeComparisons,
+		VolatileExprs:   volatileExprs,
 	}, nil
 }
 

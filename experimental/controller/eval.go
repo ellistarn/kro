@@ -17,6 +17,27 @@ import (
 	"github.com/ellistarn/kro/experimental/controller/graph"
 )
 
+// containsVolatileExpr reports whether a template string contains any CEL
+// expression that was identified at compile time as volatile (references
+// time.now()). Uses the compiled VolatileExprs set for AST-level detection
+// rather than substring matching.
+func (e *evaluator) containsVolatileExpr(s string) bool {
+	if e.compiled.VolatileExprs == nil {
+		return false
+	}
+	pos := 0
+	for {
+		_, expr, start, _ := graph.FindExpr(s, pos)
+		if start < 0 {
+			return false
+		}
+		if !graph.IsDeferred(expr) && e.compiled.VolatileExprs[expr] {
+			return true
+		}
+		pos = start + len(expr) + 3 // skip past ${expr}
+	}
+}
+
 // gateResult represents the outcome of a propagateWhen evaluation.
 type gateResult int
 
@@ -54,6 +75,17 @@ type evaluator struct {
 	// hints flow through checkPropagateWhen; this field captures hints
 	// from non-gate expressions so they can be merged into the final result.
 	requeueHint time.Duration
+
+	// timeDeps accumulates field paths whose evaluated expressions reference
+	// time.now(). Reset before each node evaluation (toMapNode). Used by
+	// reconcileApply to skip applies when the only differences from observed
+	// state are time.now()-derived timestamp drift.
+	timeDeps []string
+
+	// pathStack tracks the current field path during evaluateTree recursion.
+	// Each level pushes its key/index and pops on return. Used to record
+	// full dot-notation paths for time-dependent fields.
+	pathStack []string
 }
 
 // newEvaluator creates an evaluator for a reconcile cycle.
@@ -328,6 +360,10 @@ func (e *evaluator) toMap(tmpl map[string]any) (map[string]any, error) {
 // the identity map is evaluated — its fields may still contain CEL
 // expressions.
 func (e *evaluator) toMapNode(node graph.Node) (map[string]any, error) {
+	// Reset time-dependency tracking for this node evaluation.
+	e.timeDeps = nil
+	e.pathStack = nil
+
 	if node.TemplateExpr != "" {
 		// Body came in as a CEL expression under the classification
 		// keyword (template/patch/def as a string). Use evalString
@@ -359,24 +395,39 @@ func (e *evaluator) toMapNode(node graph.Node) (map[string]any, error) {
 func (e *evaluator) evaluateTree(value any) (any, error) {
 	switch v := value.(type) {
 	case string:
-		return e.evalString(v)
+		result, err := e.evalString(v)
+		if err != nil {
+			return nil, err
+		}
+		// Track time-dependent paths: if this string contains a CEL
+		// expression referencing time.now(), record the current path.
+		if e.containsVolatileExpr(v) && len(e.pathStack) > 0 {
+			e.timeDeps = append(e.timeDeps, strings.Join(e.pathStack, "."))
+		}
+		return result, nil
 	case map[string]any:
 		result := make(map[string]any, len(v))
 		for k, val := range v {
+			e.pathStack = append(e.pathStack, k)
 			evaluated, err := e.evaluateTree(val)
 			if err != nil {
+				e.pathStack = e.pathStack[:len(e.pathStack)-1]
 				return nil, fmt.Errorf("field %s: %w", k, err)
 			}
+			e.pathStack = e.pathStack[:len(e.pathStack)-1]
 			result[k] = evaluated
 		}
 		return result, nil
 	case []any:
 		result := make([]any, len(v))
 		for i, val := range v {
+			e.pathStack = append(e.pathStack, fmt.Sprintf("%d", i))
 			evaluated, err := e.evaluateTree(val)
 			if err != nil {
+				e.pathStack = e.pathStack[:len(e.pathStack)-1]
 				return nil, fmt.Errorf("index %d: %w", i, err)
 			}
+			e.pathStack = e.pathStack[:len(e.pathStack)-1]
 			result[i] = evaluated
 		}
 		return result, nil

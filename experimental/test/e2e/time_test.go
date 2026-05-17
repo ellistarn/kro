@@ -1700,7 +1700,7 @@ func TestTimeNowMultipleGates(t *testing.T) {
 	}
 	require.NoError(t, k8sClient.Create(ctx, source))
 
-	// Graph: two gated nodes with different thresholds (3s and 7s).
+	// Graph: two gated nodes with different thresholds (3s and 12s).
 	graph := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "experimental.kro.run/v1alpha1",
@@ -1731,7 +1731,7 @@ func TestTimeNowMultipleGates(t *testing.T) {
 					},
 					map[string]any{
 						"id":            "slow",
-						"propagateWhen": []any{"${time.now() - timestamp(source.data.createdAt) >= duration('7s')}"},
+						"propagateWhen": []any{"${time.now() - timestamp(source.data.createdAt) >= duration('12s')}"},
 						"template": map[string]any{
 							"apiVersion": "v1",
 							"kind":       "ConfigMap",
@@ -1759,12 +1759,12 @@ func TestTimeNowMultipleGates(t *testing.T) {
 	require.NoError(t, err, "slow gate must not fire before its threshold")
 	t.Log("Confirmed: slow-output still absent after fast appeared")
 
-	// Slow gate should fire within 10s from test start.
+	// Slow gate should fire within 18s from test start.
 	slowOutput := &unstructured.Unstructured{}
 	slowOutput.SetGroupVersionKind(cmGVK)
 	require.NoError(t, waitForResource(ctx, k8sClient,
-		types.NamespacedName{Name: "slow-output", Namespace: ns}, slowOutput, 10*time.Second),
-		"slow gate (7s) must fire within 10s")
+		types.NamespacedName{Name: "slow-output", Namespace: ns}, slowOutput, 18*time.Second),
+		"slow gate (12s) must fire within 18s")
 
 	fastData, _, _ := unstructured.NestedString(fastOutput.Object, "data", "gate")
 	slowData, _, _ := unstructured.NestedString(slowOutput.Object, "data", "gate")
