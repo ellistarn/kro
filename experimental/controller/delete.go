@@ -54,9 +54,8 @@ func (r *GraphReconciler) reconcileDelete(ctx context.Context, graph *unstructur
 
 		// -----------------------------------------------------------------------
 		// Delegate to pruneResources: all keys are candidates, currentKeys empty.
-		// Teardown skips identity-label verification (checkIdentityLabels=false).
 		// -----------------------------------------------------------------------
-		pr := cluster.pruneResources(ctx, rs, candidates, nil, teardownDAGs, teardownEval, teardownState, false)
+		pr := cluster.pruneResources(ctx, rs, candidates, nil, teardownDAGs, teardownEval, teardownState)
 
 		// Verify deleted resources are gone — only check keys with pruneDeleted outcome.
 		for _, a := range candidates {

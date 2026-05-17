@@ -445,7 +445,7 @@ func (r *GraphReconciler) reconcilePrune(
 		allDAGs = append(allDAGs, d)
 	}
 
-	pr := cluster.pruneResources(ctx, rs, candidates, currentSet, allDAGs, eval, state, true)
+	pr := cluster.pruneResources(ctx, rs, candidates, currentSet, allDAGs, eval, state)
 
 	result.errors = append(result.errors, pr.BlockedReasons...)
 	result.notes = append(result.notes, pr.Notes...)

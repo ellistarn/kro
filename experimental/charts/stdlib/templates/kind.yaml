@@ -140,6 +140,13 @@ spec:
                     ? instance.metadata.namespace + "-" : "")
                     + instance.metadata.name}}
                   namespace: '${${k.spec.scope == "Namespaced" ? instance.metadata.namespace : "kro-system"}}'
+                  ownerReferences:
+                    - apiVersion: '${${k.spec.schema.apiVersion}}'
+                      kind: "${${k.spec.schema.kind}}"
+                      name: "${${instance.metadata.name}}"
+                      uid: "${${instance.metadata.uid}}"
+                      controller: true
+                      blockOwnerDeletion: true
                 spec:
                   nodes: >-
                     ${${
@@ -152,12 +159,13 @@ spec:
                         }
                       }}]
                       + k.spec.nodes
-                      + [{"id": "status", "patch": {
+                      + [{"id": "kindInstancePatch", "patch": {
                           "apiVersion": k.spec.schema.apiVersion,
                           "kind": k.spec.schema.kind,
                           "metadata": {
                             "name": instance.metadata.name,
-                            "namespace": instance.metadata.?namespace.orValue("")
+                            "namespace": instance.metadata.?namespace.orValue(""),
+                            "finalizers": ["experimental.kro.run/graph"]
                           },
                           "status": k.spec.schema.status
                         }}]

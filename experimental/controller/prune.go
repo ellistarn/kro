@@ -6,9 +6,8 @@
 //   - Normal prune: candidates = keys in previous but not current
 //   - Teardown: candidates = all managed keys, currentKeys = empty
 //
-// The prune walk handles: template deletion, patch field release, contributor-
-// aware blocking (third-party field managers), finalization sequencing, and
-// dynamic resource discovery for forEach/CEL-named resources.
+// The prune walk handles: template deletion, patch field release, finalization
+// sequencing, and dynamic resource discovery for forEach/CEL-named resources.
 package graphcontroller
 
 import (
@@ -27,16 +26,15 @@ import (
 )
 
 // pruneOutcome describes what happened to a single prune candidate.
-// Only pruneDeferred and pruneBlocked are significant — they are consumed
-// by collectDeferredKeys to determine retry candidates. pruneDeleted is
-// recorded for logging but not consumed by any downstream logic.
+// Only pruneDeferred is significant — it is consumed by collectDeferredKeys
+// to determine retry candidates. pruneDeleted is recorded for logging but
+// not consumed by any downstream logic.
 type pruneOutcome int
 
 const (
 	pruneNone     pruneOutcome = iota // no outcome recorded; used for results already tracked elsewhere (e.g., finalization phase)
 	pruneDeleted                      // template resource deleted
 	pruneSkipped                      // no action needed (not found, not owned, parse failed)
-	pruneBlocked                      // third-party managers block deletion
 	pruneDeferred                     // finalization not ready
 )
 
@@ -51,11 +49,6 @@ type pruneResult struct {
 // pruneResources handles both normal prune (partial candidates) and teardown
 // (all keys are candidates). Returns a pruneResult with outcomes, blocked
 // reasons, notes, and errors.
-//
-// checkIdentityLabels controls whether the identity-label check is performed
-// in deletePreflight:
-//   - Teardown (false): keys come from revision specs + watch cache — trusted.
-//   - Prune (true): previous-applied-key sets can include stale entries.
 func (c *clusterAccess) pruneResources(
 	ctx context.Context,
 	rs *reconcileScope,
@@ -64,7 +57,6 @@ func (c *clusterAccess) pruneResources(
 	dags []*dagpkg.DAG,
 	eval *evaluator,
 	state *instanceState,
-	checkIdentityLabels bool,
 ) *pruneResult {
 	result := &pruneResult{
 		Outcomes: map[string]pruneOutcome{},
@@ -113,13 +105,12 @@ func (c *clusterAccess) pruneResources(
 	ordered := pruneOrderApplied(candidates, dags, rs.namespace, c.scope)
 
 	opts := pruneOpts{
-		ProtectedKeys:       finResult.ProtectedKeys,
-		CompletedTargets:    finResult.CompletedTargets,
-		ChildKeysToCleanup:  finResult.ChildKeysToCleanup,
-		CheckIdentityLabels: checkIdentityLabels,
-		FieldOwner:          graphFieldOwner(rs.graph),
-		KeyToNodeID:         keyToNodeID,
-		DAGs:                dags,
+		ProtectedKeys:      finResult.ProtectedKeys,
+		CompletedTargets:   finResult.CompletedTargets,
+		ChildKeysToCleanup: finResult.ChildKeysToCleanup,
+		FieldOwner:         graphFieldOwner(rs.graph),
+		KeyToNodeID:        keyToNodeID,
+		DAGs:               dags,
 	}
 
 	// deferredDeletes collects finalizer children whose targets were
@@ -182,22 +173,21 @@ func (c *clusterAccess) pruneResources(
 
 // pruneOpts carries read-only context from finalization into pruneCandidate.
 type pruneOpts struct {
-	ProtectedKeys       map[string]bool              // keys to skip (active finalization children)
-	CompletedTargets    map[string]bool              // targets whose finalization is done
-	ChildKeysToCleanup  map[string][]finalizationChild // target key → children to clean up after target
-	CheckIdentityLabels bool                         // prune mode (true) vs teardown mode (false)
-	FieldOwner          client.FieldOwner            // field manager name for this graph
-	KeyToNodeID         map[string]string            // resource key → DAG node ID
-	DAGs                []*dagpkg.DAG                // all DAGs for finalizer lookup
+	ProtectedKeys      map[string]bool               // keys to skip (active finalization children)
+	CompletedTargets   map[string]bool               // targets whose finalization is done
+	ChildKeysToCleanup map[string][]finalizationChild // target key → children to clean up after target
+	FieldOwner         client.FieldOwner             // field manager name for this graph
+	KeyToNodeID        map[string]string             // resource key → DAG node ID
+	DAGs               []*dagpkg.DAG                 // all DAGs for finalizer lookup
 }
 
 // pruneCandidateResult carries the outcome of processing a single candidate.
 type pruneCandidateResult struct {
-	Outcome            pruneOutcome // 0 means no outcome recorded (patch release, skipped internally)
-	BlockedReasons     []string
-	Notes              []string
-	ChildrenToCleanup  []finalizationChild // finalization children to clean up
-	Err                error               // hard API error — caller should abort
+	Outcome           pruneOutcome // 0 means no outcome recorded (patch release, skipped internally)
+	BlockedReasons    []string
+	Notes             []string
+	ChildrenToCleanup []finalizationChild // finalization children to clean up
+	Err               error               // hard API error — caller should abort
 }
 
 // pruneCandidate processes a single prune candidate: dispatches by node type
@@ -248,7 +238,7 @@ func (c *clusterAccess) pruneCandidateTemplate(
 ) pruneCandidateResult {
 	logger := log.FromContext(ctx)
 
-	pf := c.deletePreflight(ctx, key, rs, opts.CheckIdentityLabels)
+	pf := c.deletePreflight(ctx, key, rs)
 	switch pf.Outcome {
 	case deleteSkipParseFailed:
 		return pruneCandidateResult{Outcome: pruneSkipped}
@@ -256,16 +246,9 @@ func (c *clusterAccess) pruneCandidateTemplate(
 		return c.pruneCandidateNotFound(ctx, key, opts)
 	case deleteNotOwned:
 		return pruneCandidateResult{Outcome: pruneSkipped}
-	case deleteBlockedByFieldManagers:
-		logger.Info("prune blocked: resource has other field managers",
-			"key", key, "blockers", pf.Blockers)
-		return pruneCandidateResult{
-			Outcome:        pruneBlocked,
-			BlockedReasons: []string{formatBlockedReason(key, pf.Blockers)},
-		}
 	}
 
-	// deleteReady: resource exists, is ours, no third-party field managers.
+	// deleteReady: resource exists and is ours.
 	// Finalization check: if this target has finalizers, only delete if
 	// advanceFinalization marked it complete.
 	nodeID := opts.KeyToNodeID[key]
@@ -337,11 +320,11 @@ func collectPruneCandidates(prev map[string]Applied, curr map[string]Applied) []
 }
 
 // collectDeferredKeys extracts Applied entries from allPrevious whose outcome
-// is pruneDeferred or pruneBlocked (need to be retried next reconcile).
+// is pruneDeferred (need to be retried next reconcile).
 func collectDeferredKeys(outcomes map[string]pruneOutcome, allPrevious map[string]Applied) []Applied {
 	var deferred []Applied
 	for key, outcome := range outcomes {
-		if outcome == pruneDeferred || outcome == pruneBlocked {
+		if outcome == pruneDeferred {
 			if a, ok := allPrevious[key]; ok {
 				deferred = append(deferred, a)
 			}
@@ -499,17 +482,14 @@ func pruneOrderApplied(candidates []Applied, dags []*dagpkg.DAG, defaultNS strin
 type deletePreflightOutcome int
 
 const (
-	// deleteReady — the resource exists, is owned by this Graph, and has no
-	// third-party field managers. Caller may proceed with deletion.
+	// deleteReady — the resource exists and is owned by this Graph.
+	// Caller may proceed with deletion.
 	deleteReady deletePreflightOutcome = iota
 	// deleteNotFound — the resource does not exist (already gone).
 	deleteNotFound
 	// deleteNotOwned — the resource exists but is not owned by this Graph
 	// (missing identity label).
 	deleteNotOwned
-	// deleteBlockedByFieldManagers — the resource has third-party field
-	// managers; deletion should be deferred.
-	deleteBlockedByFieldManagers
 	// deleteSkipParseFailed — the resource key could not be parsed.
 	deleteSkipParseFailed
 )
@@ -517,9 +497,8 @@ const (
 // deletePreflightResult captures the outcome and metadata from a preflight
 // check so the caller can make follow-up decisions (finalization, delete, etc.).
 type deletePreflightResult struct {
-	Outcome  deletePreflightOutcome
-	Obj      *unstructured.Unstructured // live object from GET (nil if not found or parse failed)
-	Blockers []string                   // third-party field manager names (when blocked)
+	Outcome deletePreflightOutcome
+	Obj     *unstructured.Unstructured // live object from GET (nil if not found or parse failed)
 }
 
 // hasIdentityLabel reports whether any label in labels matches the graph
@@ -538,23 +517,15 @@ func hasIdentityLabel(labels map[string]string, graphName, namespace string) boo
 //
 //  1. Parse the resource key into an unstructured stub.
 //  2. GET from the API server (authoritative read, not cache).
-//  3. Verify ownership: apply hash annotation, and optionally identity labels.
-//  4. Check for third-party field managers that block deletion.
+//  3. Verify ownership via identity labels.
 //
 // The caller handles all context-specific logic (finalization, patch release,
 // deferred key tracking, FinalizerSkipped notes) and the actual delete call
 // based on the returned result.
-//
-// checkIdentityLabels controls whether the identity-label check is performed.
-// The teardown path (delete.go) skips it because it collects keys from revision
-// specs and the watch cache — it already knows they belong to this Graph. The
-// prune path (prune.go) enables it because previous-applied-key sets can include
-// stale entries from other Graphs after label changes.
 func (c *clusterAccess) deletePreflight(
 	ctx context.Context,
 	key string,
 	rs *reconcileScope,
-	checkIdentityLabels bool,
 ) deletePreflightResult {
 	obj, nn, ok := unstructuredFromKey(key)
 	if !ok {
@@ -566,43 +537,12 @@ func (c *clusterAccess) deletePreflight(
 		return deletePreflightResult{Outcome: deleteNotFound}
 	}
 
-	// Ownership gate: identity labels.
-	if checkIdentityLabels {
-		if !hasIdentityLabel(obj.GetLabels(), rs.name, rs.namespace) {
-			return deletePreflightResult{Outcome: deleteNotOwned, Obj: obj}
-		}
-	}
-
-	// Contributor-aware deletion: check managedFields for other field
-	// managers before deleting. If present, deletion is blocked — the
-	// finalizer holds until the other manager releases.
-	//
-	// Exception: during teardown (checkIdentityLabels=false), resources
-	// that the controller never successfully applied (no identity labels)
-	// are skipped rather than blocking. A conflicted resource that was
-	// never owned should not prevent Graph deletion.
-	ownManager := string(graphFieldOwner(rs.graph))
-	if blockers := thirdPartyFieldManagers(obj, ownManager); len(blockers) > 0 {
-		// If we're in teardown mode AND the resource has no identity labels,
-		// skip it — we never owned it, so we shouldn't block teardown on it.
-		if !checkIdentityLabels {
-			if !hasIdentityLabel(obj.GetLabels(), rs.name, rs.namespace) {
-				return deletePreflightResult{Outcome: deleteNotOwned, Obj: obj}
-			}
-		}
-		return deletePreflightResult{
-			Outcome:  deleteBlockedByFieldManagers,
-			Obj:      obj,
-			Blockers: blockers,
-		}
+	// Ownership gate: identity labels. Always check — a resource without
+	// this Graph's identity label was never successfully applied and must
+	// not be deleted (e.g., conflicted resources in the spec but never owned).
+	if !hasIdentityLabel(obj.GetLabels(), rs.name, rs.namespace) {
+		return deletePreflightResult{Outcome: deleteNotOwned, Obj: obj}
 	}
 
 	return deletePreflightResult{Outcome: deleteReady, Obj: obj}
-}
-
-// formatBlockedReason builds the standard TeardownBlocked message for
-// third-party field managers. Used by both teardown and prune paths.
-func formatBlockedReason(key string, blockers []string) string {
-	return fmt.Sprintf("TeardownBlocked: %s (third-party field managers: %s)",
-		key, strings.Join(blockers, ", "))
 }

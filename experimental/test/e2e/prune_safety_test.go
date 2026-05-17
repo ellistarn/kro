@@ -146,25 +146,21 @@ func TestPruneSafetyPendingBlocksPrune(t *testing.T) {
 	t.Log("Graph recovered after toggle restored")
 }
 
-// TestPruneManagedCheckBlocksDeletion proves that the controller respects
-// managedFields during teardown — if another field manager has an SSA Apply
-// entry on a template: resource, the finalizer holds until the other manager
-// releases.
+// TestPruneManagedFieldsDoNotBlockDeletion proves that the controller deletes
+// template resources regardless of external field managers — field ownership
+// is not a lifecycle signal; Kubernetes finalizers are.
 //
-// Design 003-ownership § Prune — managed check:
+// Design 003-ownership § Deletion:
 //
-//	"Before deleting a template: resource, checks managedFields for other field
-//	managers. If present, deletion is blocked until the other manager releases."
+//	"Field managers on the resource do not block deletion — Kubernetes finalizers
+//	are the correct mechanism for preventing premature deletion."
 //
 // Setup:
-//   - Graph creates and owns a ConfigMap (template:, template hash set).
-//   - After convergence, external manager SSA-applies a field to the same CM,
-//     gaining a managedFields entry.
-//   - Graph is deleted (deletion timestamp set, finalizer holds).
-//   - The ConfigMap must survive — controller detects the third-party manager.
-//   - Cleanup: delete the ConfigMap directly → controller can proceed with
-//     teardown → Graph finalizer removed.
-func TestPruneManagedCheckBlocksDeletion(t *testing.T) {
+//   - Graph creates and owns a ConfigMap (template:).
+//   - After convergence, external manager SSA-applies a field to the same CM.
+//   - Graph is deleted.
+//   - The ConfigMap must be deleted — external field managers don't block.
+func TestPruneManagedFieldsDoNotBlockDeletion(t *testing.T) {
 	t.Parallel()
 	ns := createNamespace(t)
 
@@ -206,18 +202,15 @@ func TestPruneManagedCheckBlocksDeletion(t *testing.T) {
 	t.Log("ConfigMap created, Graph Active — managedFields has kro entry")
 
 	// 3. External manager SSA-applies a different field to the same ConfigMap.
-	// This adds a second managedFields entry (external-manager). The controller
-	// must detect this before deleting on teardown.
 	applyConfigMapAs(t, ns, "prune-managed-cm", "external-manager", map[string]string{
 		"extra-field": "external-value",
 	})
-	// Verify the external field is there before proceeding.
 	require.NoError(t, waitForField(ctx, k8sClient, cmGVK,
 		types.NamespacedName{Name: "prune-managed-cm", Namespace: ns},
 		[]string{"data", "extra-field"}, "external-value"))
 	t.Log("External manager applied — ConfigMap now has two managedFields entries")
 
-	// 4. Delete the Graph (sets deletion timestamp, finalizer holds teardown).
+	// 4. Delete the Graph.
 	latest := &unstructured.Unstructured{}
 	latest.SetGroupVersionKind(GraphGVK)
 	require.NoError(t, k8sClient.Get(ctx,
@@ -225,51 +218,30 @@ func TestPruneManagedCheckBlocksDeletion(t *testing.T) {
 	require.NoError(t, k8sClient.Delete(ctx, latest))
 	t.Log("Graph deletion requested")
 
-	// 5. THE KEY ASSERTION: after the controller processes the deletion,
-	// the ConfigMap must survive. Give the controller time to process the event
-	// and confirm the resource wasn't deleted.
-	require.NoError(t, waitForSettle(ctx, k8sClient, GraphGVK,
-		types.NamespacedName{Name: "test-prune-managed-teardown", Namespace: ns}))
-
-	surviving := &unstructured.Unstructured{}
-	surviving.SetGroupVersionKind(cmGVK)
-	require.NoError(t, k8sClient.Get(ctx,
-		types.NamespacedName{Name: "prune-managed-cm", Namespace: ns}, surviving),
-		"ConfigMap must survive teardown when another field manager is present")
-	t.Log("ConfigMap survived Graph deletion — managedFields check blocked teardown deletion")
-
-	// 6. Cleanup: delete the ConfigMap directly so the controller can finish
-	// teardown. Without this, the test namespace cleanup might hang.
-	require.NoError(t, k8sClient.Delete(ctx, surviving))
-	t.Log("ConfigMap manually deleted — unblocking teardown")
-
-	// 7. Controller should now complete teardown and remove the Graph finalizer.
+	// 5. THE KEY ASSERTION: Graph teardown completes and deletes the ConfigMap
+	// despite the external field manager. Field managers don't block deletion.
 	require.NoError(t, waitForDeletion(ctx, k8sClient, GraphGVK,
 		types.NamespacedName{Name: "test-prune-managed-teardown", Namespace: ns}))
-	t.Log("Graph fully deleted after ConfigMap was removed — managedFields teardown block proved")
+	require.NoError(t, waitForDeletion(ctx, k8sClient, cmGVK,
+		types.NamespacedName{Name: "prune-managed-cm", Namespace: ns}))
+	t.Log("Graph and ConfigMap deleted — external field managers do not block teardown")
 }
 
-// TestPruneManagedCheckOnSpecChange proves that the controller respects
-// managedFields during wind/prune — if another field manager has an SSA Apply
-// entry on a template: resource that becomes a prune candidate (removed from spec),
-// deletion is blocked.
+// TestPruneManagedFieldsDoNotBlockSpecChange proves that when a node is removed
+// from the Graph spec, the resource is pruned even if an external field manager
+// has an SSA Apply entry on it.
 //
-// Design 003-ownership § Prune — managed check (wind path, apply.go):
+// Design 003-ownership § Deletion:
 //
-//	"Before deleting a template: resource, checks managedFields for other field
-//	managers. If present, deletion is blocked."
-//
-// This is a distinct code path from the teardown check (TestPruneManagedCheckBlocksDeletion).
-// A spec change removes a node from the graph; the applied set still contains
-// the resource; the prune loop checks managedFields before deleting.
+//	"Field managers on the resource do not block deletion."
 //
 // Setup:
 //   - Graph creates two independent ConfigMaps (A and B).
 //   - External manager applies a field to CM-A.
 //   - Graph spec is updated to remove node A.
-//   - CM-A must survive (prune blocked by external manager).
-//   - CM-B must also survive (still in spec).
-func TestPruneManagedCheckOnSpecChange(t *testing.T) {
+//   - CM-A must be deleted (external managers don't block prune).
+//   - CM-B must survive (still in spec).
+func TestPruneManagedFieldsDoNotBlockSpecChange(t *testing.T) {
 	t.Parallel()
 	ns := createNamespace(t)
 
@@ -349,29 +321,22 @@ func TestPruneManagedCheckOnSpecChange(t *testing.T) {
 		}))
 	t.Log("Removed nodeA from spec — prune candidate created")
 
-	// 5. Wait for Graph to settle on the new spec.
-	require.NoError(t, waitForSettle(ctx, k8sClient, GraphGVK,
-		types.NamespacedName{Name: "test-prune-managed-spec", Namespace: ns}))
+	// 5. THE KEY ASSERTION: CM-A is deleted despite external field manager.
+	require.NoError(t, waitForDeletion(ctx, k8sClient, cmGVK,
+		types.NamespacedName{Name: "prune-managed-a", Namespace: ns}),
+		"CM-A must be deleted — external field managers do not block prune")
+	t.Log("CM-A deleted — external field managers do not block prune")
 
-	// 6. THE KEY ASSERTION: CM-A must survive despite being removed from spec,
-	// because the external manager's managedFields entry blocks deletion.
-	checkA := &unstructured.Unstructured{}
-	checkA.SetGroupVersionKind(cmGVK)
-	require.NoError(t, k8sClient.Get(ctx,
-		types.NamespacedName{Name: "prune-managed-a", Namespace: ns}, checkA),
-		"CM-A must survive spec-change prune when another field manager is present")
-	data, _, _ := unstructured.NestedStringMap(checkA.Object, "data")
-	assert.Equal(t, "external-value", data["external-key"],
-		"external manager's field should be intact on the surviving CM")
-	t.Log("CM-A survived spec-change prune — managedFields check blocked wind/prune deletion")
-
-	// 7. CM-B must also still exist (still in spec).
+	// 6. CM-B must still exist (still in spec).
 	checkB := &unstructured.Unstructured{}
 	checkB.SetGroupVersionKind(cmGVK)
 	require.NoError(t, k8sClient.Get(ctx,
 		types.NamespacedName{Name: "prune-managed-b", Namespace: ns}, checkB),
 		"CM-B must still exist — it was not removed from spec")
 	t.Log("CM-B still exists — unrelated nodes unaffected")
+
+	// Cleanup.
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, graph) })
 }
 
 // TestPruneSafetyConflictBlocksPrune proves that when a node is in Conflict

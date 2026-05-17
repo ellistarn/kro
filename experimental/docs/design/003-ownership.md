@@ -193,15 +193,14 @@ The release always targets the main resource; if the node wrote status fields, a
 release targets the status subresource. If the release returns 404, the resource is already gone —
 release succeeds. Other failures retry on the next reconcile.
 
-## Blocked Deletion
+## Deletion
 
-Before deleting a `template:` resource, the controller checks managedFields for other field managers
-(excluding the API server's own). If present, deletion is blocked — another actor depends on the
-resource's existence. The condition message names the blocking manager. During prune, the resource
-stays in the applied set until the other manager releases. During teardown, the Graph's finalizer
-holds. For force-managed templates, the post-apply release eliminates co-owners before deletion is
-attempted — so this block only fires for non-force templates where an external SSA manager appeared
-independently.
+When a `template:` resource is pruned or torn down, the controller deletes it unconditionally (after
+verifying identity labels to confirm ownership). Field managers on the resource do not block
+deletion — Kubernetes finalizers are the correct mechanism for preventing premature deletion. If an
+external actor needs the resource to persist beyond the Graph's lifecycle, it places a finalizer. The
+controller's verification loop handles this naturally: the resource stays Terminating until all
+finalizers resolve, and the controller polls until it returns NotFound.
 
 ## Why Not
 
