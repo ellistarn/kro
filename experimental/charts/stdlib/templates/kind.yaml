@@ -42,12 +42,12 @@ spec:
               subresources:
                 status: {}
               additionalPrinterColumns:
-                - name: Kind
-                  type: string
-                  jsonPath: .spec.schema.kind
                 - name: APIVersion
                   type: string
                   jsonPath: .spec.schema.apiVersion
+                - name: Kind
+                  type: string
+                  jsonPath: .spec.schema.kind
                 - name: Scope
                   type: string
                   jsonPath: .spec.scope
@@ -81,7 +81,7 @@ spec:
         apiVersion: experimental.kro.run/v1alpha1
         kind: Graph
         metadata:
-          name: kind-${k.metadata.name}
+          name: kind.${k.metadata.name}
           namespace: kro-system
         spec:
           nodes:
@@ -135,9 +135,10 @@ spec:
                 kind: Graph
                 metadata:
                   name: >-
-                    ${${(has(instance.metadata.namespace) && instance.metadata.namespace != ""
+                    ${${"kind." + k.metadata.name + "."
+                    + (has(instance.metadata.namespace) && instance.metadata.namespace != ""
                     ? instance.metadata.namespace + "-" : "")
-                    + instance.metadata.name + "-" + k.spec.schema.kind.lowerAscii()}}
+                    + instance.metadata.name}}
                 spec:
                   nodes: >-
                     ${${
@@ -171,7 +172,7 @@ spec:
         apiVersion: experimental.kro.run/v1alpha1
         kind: Kind
         metadata:
-          # Controller Graphs are named "kind-<kindname>". Strip the 5-char
+          # Controller Graphs are named "kind.<kindname>". Strip the 5-char
           # prefix to recover the Kind resource name.
           name: ${graph.metadata.name.substring(5)}
         status:
