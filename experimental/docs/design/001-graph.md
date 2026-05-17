@@ -192,10 +192,10 @@ Nodes expose functions that enable other nodes to reason about their state.
   dependency readiness `readyWhen: [${node.dependencies().all(d, d.ready())}]`.
 - **`time.now()`** — the current wall clock as a CEL-native `timestamp`. When it appears in a
   comparison, kro solves for the moment the comparison becomes true and enqueues reconciliation.
-- **`.condition(type, status, reason, message)`** — constructs a Kubernetes status condition.
-  Reads the scope entry's `.status.conditions` to find the existing condition by type. Preserves
-  `lastTransitionTime` when status is unchanged; stamps `time.now()` on transition. Sets
-  `observedGeneration` from `.metadata.generation`.
+- **`.condition(type, status, reason, message)`** — sugar for constructing a Kubernetes status
+  condition from observed state. Finds existing condition by type, preserves `lastTransitionTime`
+  when status is unchanged, stamps `time.now()` on transition, sets `observedGeneration` from
+  `.metadata.generation`. See §Observed State for the underlying pattern.
 - **`plural(s)`** — English pluralization. Returns the plural form of the input string. Example:
   `plural("WebApp").lowerAscii()` → `"webapps"`.
 - **`simpleSchema.toOpenAPI(schema, resources)`** — Converts a SimpleSchema map and resource list
@@ -354,6 +354,139 @@ It's common to combine `finalizes` with `readyWhen` to coordinate graceful remov
     - ${snapshot.status.readyToUse == true}
 ```
 
+## Observed State
+
+Before evaluating a node's expressions, kro GETs the target resource from the API server. The
+result — the full live object including `metadata` and `status` — enters scope under the node's
+`id`. This is the observed state: what exists before the node acts. When the resource does not yet
+exist (first create), the scope entry is an empty map — expressions use optional chaining (`.?`,
+`.orValue()`) to provide defaults. After apply, the response replaces the scope entry — downstream
+nodes see the post-apply state, not the pre-apply observation.
+
+Self-reference follows naturally: a node can reference its own `id` in its expressions to read its
+observed state. `deployment.metadata.generation` in the `deployment` node's template reads the live
+generation from the GET. `deployment.status.conditions` reads the existing conditions. This lets a
+node compare observed with desired and compute transitions.
+
+### Status Conditions
+
+Status conditions are a pattern built on observed state. A node reads its target's existing
+conditions and generation, computes new conditions, and writes them back. The `observedGeneration`
+field reports the generation of the object being written to — confirming the controller has processed
+that generation.
+
+**Single template — self-reference:**
+
+```yaml
+- id: myapp
+  template:
+    apiVersion: example.com/v1
+    kind: MyApp
+    metadata:
+      name: my-app
+    spec:
+      image: nginx
+    status:
+      conditions: ${[
+        {
+          "type": "Ready",
+          "status": myapp.?status.?availableReplicas.orValue(0) > 0 ? "True" : "False",
+          "observedGeneration": myapp.?metadata.?generation.orValue(0),
+          "lastTransitionTime": myapp.?status.?conditions.orValue([]).exists(c, c.type == "Ready")
+            && myapp.status.conditions.filter(c, c.type == "Ready")[0].status
+               == (myapp.?status.?availableReplicas.orValue(0) > 0 ? "True" : "False")
+            ? myapp.status.conditions.filter(c, c.type == "Ready")[0].lastTransitionTime
+            : time.now()
+        }
+      ]}
+```
+
+On first create (GET 404), `myapp` is an empty map. Optional chaining resolves: `availableReplicas`
+defaults to `0`, `generation` to `0`, `conditions` to `[]`. The condition gets `time.now()` as its
+initial timestamp. On subsequent reconciles, the GET succeeds and self-reference reads the live
+object. A non-404 GET failure (5xx, network timeout) is a transient error — the node becomes
+SystemError and retries with backoff. The controller does not evaluate the template when observed
+state is unknown.
+
+**Decorator — ref + patch:**
+
+```yaml
+- id: webapp
+  ref:
+    apiVersion: example.com/v1
+    kind: WebApp
+    metadata:
+      name: my-app
+
+- id: deployment
+  template:
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: ${webapp.metadata.name}
+    spec:
+      replicas: 3
+      # ...
+
+- id: webappStatus
+  patch:
+    apiVersion: example.com/v1
+    kind: WebApp
+    metadata:
+      name: ${webapp.metadata.name}
+      namespace: ${webapp.metadata.namespace}
+    status:
+      conditions: ${[
+        {
+          "type": "Ready",
+          "status": deployment.ready() ? "True" : "False",
+          "observedGeneration": webapp.metadata.generation,
+          "lastTransitionTime": webapp.status.conditions.exists(c, c.type == "Ready")
+            && webapp.status.conditions.filter(c, c.type == "Ready")[0].status
+               == (deployment.ready() ? "True" : "False")
+            ? webapp.status.conditions.filter(c, c.type == "Ready")[0].lastTransitionTime
+            : time.now()
+        }
+      ]}
+```
+
+The ref provides observed state of the target resource. The patch reads generation and conditions
+through `webapp` — the ref's scope entry — rather than through self-reference (`webappStatus`),
+because the ref already GETs the same resource. Both paths yield identical data; the ref decouples
+the read (observation) from the write (patch), making the dependency graph explicit.
+
+**`.condition()` sugar:** `.condition(type, status, reason, message)` is a convenience function that
+encapsulates the pattern above — find existing condition by type, preserve `lastTransitionTime` when
+status is unchanged, stamp `time.now()` on transition, set `observedGeneration` from
+`.metadata.generation`. Handles first-create (empty map) internally. Called on any scope entry:
+
+```yaml
+status:
+  conditions: ${[
+    myapp.condition('Ready',
+      myapp.?status.?availableReplicas.orValue(0) > 0 ? 'True' : 'False',
+      'Available', 'Replicas available')
+  ]}
+```
+
+### Reading Conditions
+
+The same primitive enables reading conditions for downstream decisions. Filter by
+`observedGeneration` to ensure you only use conditions that reflect the current spec:
+
+```yaml
+- id: production
+  propagateWhen:
+    - >-
+      ${staging.status.conditions.exists(c,
+        c.type == 'Available'
+        && c.observedGeneration == staging.metadata.generation
+        && c.status == 'True')}
+```
+
+This gates `production` until the staging controller has reconciled the current generation and
+reports Available. Stale conditions from a previous generation don't match.
+
 ## Time
 
 `time.now()` returns the current wall clock as a CEL-native `timestamp`. All duration arithmetic
@@ -363,28 +496,18 @@ becomes true and enqueues reconciliation for exactly that time. The comparison o
 kro something to solve — it works wherever the comparison appears: gate expressions, ternaries,
 value expressions.
 
-```yaml
-# Wait 2 hours after staging is ready before rolling out production.
-- id: staging
-  readyWhen:
-    - ${staging.status.availableReplicas == staging.spec.replicas}
-  template:
-    apiVersion: apps/v1
-    kind: Deployment
-    metadata:
-      name: my-app-staging
-      namespace: us-west-2
-    spec:
-      replicas: 2
-      # ...
+Adding a duration constraint to the generation filter from §Reading Conditions:
 
+```yaml
+# Wait 2 hours after staging reports Available for the current generation.
 - id: production
   propagateWhen:
-    - ${staging.ready()}
     - >-
-      ${time.now() - timestamp(staging.status.conditions.filter(
-        c, c.type == 'Available' && c.status == 'True'
-      )[0].lastTransitionTime) >= duration('2h')}
+      ${staging.status.conditions.exists(c,
+        c.type == 'Available'
+        && c.observedGeneration == staging.metadata.generation
+        && c.status == 'True'
+        && time.now() - timestamp(c.lastTransitionTime) >= duration('2h'))}
   template:
     apiVersion: apps/v1
     kind: Deployment
@@ -396,59 +519,15 @@ value expressions.
       # ...
 ```
 
-Kro solves `time.now() - lastTransitionTime >= 2h` → enqueue at `lastTransitionTime + 2h`. Two
-hours after staging becomes ready, one reconciliation fires and `production` proceeds.
+Kro solves `time.now() - lastTransitionTime >= 2h` → enqueue at `lastTransitionTime + 2h`. The
+timestamp is read from the observed state — the staging controller already set it. Two hours after
+staging becomes Available for the current generation, one reconciliation fires and `production`
+proceeds.
 
 Without a comparison, `time.now()` is a raw value — nothing to solve, no enqueue. Writing
-`time.now()` directly onto a resource produces a new value on every reconciliation. Use
-`.condition()` for status timestamps — it settles by preserving `lastTransitionTime` when status is
-unchanged. Raw `time.now()` in a write path without a settling mechanism is the user's
-responsibility to manage.
-
-### Status Conditions
-
-`.condition(type, status, reason, message)` constructs a Kubernetes status condition with correct
-`lastTransitionTime` semantics. Called on a scope entry that carries `.status.conditions` and
-`.metadata.generation`:
-
-```yaml
-- id: instanceStatus
-  patch:
-    apiVersion: myapp.example.com/v1
-    kind: MyApp
-    metadata:
-      name: ${schema.metadata.name}
-      namespace: ${schema.metadata.namespace}
-    status:
-      conditions: ${[
-        schema.condition('Ready',
-          deployment.ready() && service.ready() ? 'True' : 'False',
-          'Ready', 'All resources reconciled'),
-        schema.condition('DatabaseReady',
-          db.ready() ? 'True' : 'False',
-          'Connected', 'Database connection established'),
-      ]}
-```
-
-The function is equivalent to:
-
-```cel
-{
-  "type": type,
-  "status": status,
-  "reason": reason,
-  "message": message,
-  "observedGeneration": schema.metadata.generation,
-  "lastTransitionTime": schema.status.conditions.exists(c, c.type == type)
-    ? (schema.status.conditions.filter(c, c.type == type)[0].status == status
-        ? schema.status.conditions.filter(c, c.type == type)[0].lastTransitionTime
-        : time.now())
-    : time.now()
-}
-```
-
-`lastTransitionTime` is preserved when status is unchanged. `time.now()` only stamps on actual
-transitions.
+`time.now()` directly onto a resource produces a new value on every reconciliation. The condition
+patterns above settle naturally because `lastTransitionTime` is preserved when status is unchanged.
+Raw `time.now()` in a write path without a settling mechanism is the user's responsibility to manage.
 
 ### Why Not
 
@@ -457,8 +536,13 @@ polling intervals to tune, side effects to reason about. A comparison involving 
 kro enough information to solve for the exact enqueue time.
 
 **Automatic condition management by the runtime.** Users should decide what conditions exist, what
-they mean, and when they transition. `time.now()` provides the clock, `.condition()` provides the
-sugar, `patch:` writes the result — no implicit conditions created by the system.
+they mean, and when they transition. `time.now()` provides the clock, observed state provides
+existing timestamps, `patch:` or `template:` writes the result — no implicit conditions created by
+the system.
+
+**A separate `observed` variable.** Unnecessary — the scope entry *is* the observed state. The GET
+that precedes evaluation populates it. Adding a parallel variable duplicates data under a different
+name.
 
 ## Nested Graphs
 
@@ -641,10 +725,6 @@ The ownerReference triggers self-deletion. The patch holds the owner until teard
 releases the finalizer, the owner completes deletion.
 
 ## Why Not
-
-**`observed` as a user-visible scope variable.** Ref nodes already provide live resource state in
-scope. The scope entry _is_ the observed state — adding a parallel variable duplicates data under a
-different name.
 
 **`immutable()` as a CEL function.** Write constraints (preventing field mutation after creation)
 are a policy concern, not a value expression. CEL expressions produce values; they do not constrain

@@ -194,6 +194,24 @@ func waitForSettle(ctx context.Context, c client.Client, gvk schema.GroupVersion
 	})
 }
 
+// waitForConditionMessage polls until the first condition's message matches the expected value.
+func waitForConditionMessage(ctx context.Context, c client.Client, gvk schema.GroupVersionKind, key types.NamespacedName, expected string) error {
+	return wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 10*time.Second, true, func(ctx context.Context) (bool, error) {
+		obj := &unstructured.Unstructured{}
+		obj.SetGroupVersionKind(gvk)
+		if err := c.Get(ctx, key, obj); err != nil {
+			return false, nil
+		}
+		conditions, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
+		if len(conditions) == 0 {
+			return false, nil
+		}
+		cond := conditions[0].(map[string]any)
+		msg, _ := cond["message"].(string)
+		return msg == expected, nil
+	})
+}
+
 // updateWithRetry fetches the latest version of an unstructured resource,
 // applies the mutate function, and retries on conflict. This eliminates
 // flakes caused by the controller updating the object between Get and Update.
@@ -567,4 +585,66 @@ func countRevisions(ctx context.Context, c client.Client, graphName, namespace s
 	return len(revisions), nil
 }
 
+// waitForConditionStatus polls until a resource's status.conditions contains
+// a condition with the given type and status value.
+func waitForConditionStatus(ctx context.Context, t *testing.T, c client.Client, gvk schema.GroupVersionKind, key types.NamespacedName, condType string, expectedStatus string, timeout time.Duration) error {
+	t.Helper()
+	return wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, timeout, true, func(ctx context.Context) (bool, error) {
+		obj := &unstructured.Unstructured{}
+		obj.SetGroupVersionKind(gvk)
+		if err := c.Get(ctx, key, obj); err != nil {
+			return false, nil
+		}
+		conditions, found, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
+		if !found {
+			return false, nil
+		}
+		for _, c := range conditions {
+			cMap, ok := c.(map[string]any)
+			if !ok {
+				continue
+			}
+			if cMap["type"] == condType && cMap["status"] == expectedStatus {
+				return true, nil
+			}
+		}
+		return false, nil
+	})
+}
 
+// waitForConditionWithGeneration polls until the named condition has the
+// expected status AND a non-zero observedGeneration. This is stricter than
+// waitForConditionStatus and prevents races where the condition appears
+// before observedGeneration is populated.
+func waitForConditionWithGeneration(ctx context.Context, t *testing.T, c client.Client, gvk schema.GroupVersionKind, key types.NamespacedName, condType string, expectedStatus string, timeout time.Duration) error {
+	t.Helper()
+	return wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, timeout, true, func(ctx context.Context) (bool, error) {
+		obj := &unstructured.Unstructured{}
+		obj.SetGroupVersionKind(gvk)
+		if err := c.Get(ctx, key, obj); err != nil {
+			return false, nil
+		}
+		conditions, found, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
+		if !found {
+			return false, nil
+		}
+		for _, c := range conditions {
+			cMap, ok := c.(map[string]any)
+			if !ok {
+				continue
+			}
+			if cMap["type"] == condType && cMap["status"] == expectedStatus {
+				// Also require observedGeneration to be set.
+				switch v := cMap["observedGeneration"].(type) {
+				case int64:
+					return v > 0, nil
+				case float64:
+					return int64(v) > 0, nil
+				default:
+					return false, nil
+				}
+			}
+		}
+		return false, nil
+	})
+}

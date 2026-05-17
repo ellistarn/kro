@@ -28,12 +28,14 @@ scope, revision, and watches.
 
 ### Scope
 
-Nodes communicate through a scope — the graph's resolved data keyed by node ID. After a node is
-resolved, its output is published to the scope. Scope is the single source of data for template
-evaluation, readyWhen, propagateWhen, and includeWhen — if it's not in scope, the expression can't
-see it. Workers receive read-only views of the scope containing their dependencies' outputs. Hard
-dependencies are always present in the view (the node waited for them). Soft dependencies are
-optional — `optional.of(object)` when available at dispatch time, `optional.none()` otherwise.
+Nodes communicate through a scope — the graph's resolved data keyed by node ID. Before evaluation,
+the node's target resource is read from the API server and enters scope as observed state (see
+001-graph § Observed State). After resolution, the apply response replaces it — downstream consumers
+see post-apply state. Scope is the single source of data for template evaluation, readyWhen,
+propagateWhen, and includeWhen — if it's not in scope, the expression can't see it. Workers receive
+read-only views of the scope containing their dependencies' outputs. Hard dependencies are always
+present in the view (the node waited for them). Soft dependencies are optional —
+`optional.of(object)` when available at dispatch time, `optional.none()` otherwise.
 
 ### Node States
 
