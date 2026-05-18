@@ -80,6 +80,19 @@ func (c *clusterAccess) pruneResources(
 		}
 	}
 
+	// Backfill keyToNodeID from runtime labels for CEL-named nodes that
+	// staticResourceKey cannot resolve. The identity label on managed
+	// resources encodes the node ID, bridging runtime keys to DAG nodes
+	// even when the metadata.name contains CEL expressions.
+	for _, candidate := range candidates {
+		if candidate.NodeID != "" {
+			if _, exists := keyToNodeID[candidate.Key]; !exists {
+				keyToNodeID[candidate.Key] = candidate.NodeID
+				nodeIDToKey[candidate.NodeID] = candidate.Key
+			}
+		}
+	}
+
 	// Phase 1: Advance finalization state machines for all candidates that
 	// have finalizer nodes. This produces completedTargets (safe to delete),
 	// protectedKeys (must not prune), and child cleanup info.
@@ -394,8 +407,10 @@ func (c *clusterAccess) findManagedResourceKeys(ctx context.Context, rs *reconci
 					if nt, ok := graphpkg.NodeTypeFromLabelValue(labelValue); ok {
 						nodeType = nt
 					}
+					nodeID, _ := graphpkg.ParseNodeIDFromLabel(labelKey)
 					keys = append(keys, Applied{
 						Key:       rk,
+						NodeID:    nodeID,
 						NodeType:  nodeType,
 						HasStatus: false, // unknown from labels
 					})

@@ -409,6 +409,7 @@ func (r *GraphReconciler) reconcilePrune(
 		for key, entry := range appliedSet {
 			allPreviousKeys[key] = Applied{
 				Key:      key,
+				NodeID:   entry.NodeID,
 				NodeType: entry.NodeType,
 			}
 		}
