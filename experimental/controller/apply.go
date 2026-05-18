@@ -51,8 +51,8 @@ func graphFieldOwner(graph *unstructured.Unstructured) client.FieldOwner {
 // not this Graph's own manager and not the API server's defaulting manager.
 // Only SSA Apply managers are considered — Update managers (from kubectl edit,
 // plain client.Update, etc.) don't declare field ownership and shouldn't block
-// deletion. Per 003-ownership.md: before deleting a Template resource, check
-// managedFields for other field managers (excluding the API server's own).
+// apply. Per 003-ownership.md: used by the dry-run conflict check and
+// force-apply eviction path to detect field co-ownership.
 func thirdPartyFieldManagers(obj *unstructured.Unstructured, ownFieldManager string) []string {
 	managedFields := obj.GetManagedFields()
 	if len(managedFields) == 0 {
