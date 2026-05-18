@@ -38,7 +38,7 @@ spec:
               storage: true
               schema:
                 openAPIV3Schema: >-
-                  ${simpleSchema.toOpenAPI({"types": {"Node": {"id": "string", "template": "any", "patch": "any", "ref": "any", "watch": "any", "def": "any", "forEach": "[]map[string]string", "finalizes": "string", "includeWhen": "[]string", "readyWhen": "[]string", "propagateWhen": "[]string"}, "PrinterColumn": {"name": "string | required=true", "type": "string | required=true", "jsonPath": "string | required=true", "description": "string", "format": "string", "priority": "integer"}, "Condition": {"type": "string | required=true", "status": "string | required=true", "reason": "string", "message": "string", "lastTransitionTime": "string", "observedGeneration": "integer"}}, "spec": {"scope": "string | default=Namespaced", "schema": {"apiVersion": "string | required=true pattern=^[a-z][a-z0-9.-]*/[a-z][a-z0-9]*$", "kind": "string | required=true", "spec": "object", "status": "object", "types": "object"}, "propagateWhen": "[]string", "nodes": "[]Node", "additionalPrinterColumns": "[]PrinterColumn"}, "status": {"items": "integer", "conditions": "[]Condition"}}, [])}
+                  ${simpleSchema.toOpenAPI({"types": {"Node": {"id": "string", "template": "any", "patch": "any", "ref": "any", "watch": "any", "def": "any", "forEach": "[]map[string]string", "finalizes": "string", "includeWhen": "[]string", "readyWhen": "[]string", "propagateWhen": "[]string"}, "PrinterColumn": {"name": "string | required=true", "type": "string | required=true", "jsonPath": "string | required=true", "description": "string", "format": "string", "priority": "integer"}, "Condition": {"type": "string | required=true", "status": "string | required=true", "reason": "string", "message": "string", "lastTransitionTime": "string", "observedGeneration": "integer"}}, "spec": {"scope": "string | default=Namespaced", "schema": {"apiVersion": "string | required=true pattern=^[a-z][a-z0-9.-]*/[a-z][a-z0-9]*$", "kind": "string | required=true", "spec": "object", "status": "object | default={}", "types": "object"}, "propagateWhen": "[]string | default=[]", "nodes": "[]Node", "additionalPrinterColumns": "[]PrinterColumn | default=[]"}, "status": {"items": "integer", "conditions": "[]Condition"}}, [])}
               subresources:
                 status: {}
               additionalPrinterColumns:
@@ -112,7 +112,7 @@ spec:
                         status: {}
                       schema:
                         openAPIV3Schema: ${${simpleSchema.toOpenAPI(k.spec.schema, k.spec.nodes)}}
-                      additionalPrinterColumns: '${${has(k.spec.additionalPrinterColumns) ? k.spec.additionalPrinterColumns : []}}'
+                      additionalPrinterColumns: '${${k.spec.additionalPrinterColumns}}'
 
             - id: watchInstances
               includeWhen:
@@ -129,14 +129,14 @@ spec:
             - id: instances
               forEach:
                 - instance: ${${watchInstances}}
-              propagateWhen: "${has(k.spec.propagateWhen) ? k.spec.propagateWhen : []}"
+              propagateWhen: "${k.spec.propagateWhen}"
               template:
                 apiVersion: experimental.kro.run/v1alpha1
                 kind: Graph
                 metadata:
                   name: >-
                     ${${"kind." + k.metadata.name + "."
-                    + (has(instance.metadata.namespace) && instance.metadata.namespace != ""
+                    + (instance.metadata.?namespace.orValue("") != ""
                     ? instance.metadata.namespace + "-" : "")
                     + instance.metadata.name}}
                   namespace: '${${k.spec.scope == "Namespaced" ? instance.metadata.namespace : "kro-system"}}'
@@ -148,19 +148,19 @@ spec:
                         "kind": k.spec.schema.kind,
                         "metadata": {
                           "name": instance.metadata.name,
-                          "namespace": has(instance.metadata.namespace) ? instance.metadata.namespace : ""
+                          "namespace": instance.metadata.?namespace.orValue("")
                         }
                       }}]
                       + k.spec.nodes
-                      + (has(k.spec.schema.status) ? [{"id": "status", "patch": {
+                      + [{"id": "status", "patch": {
                           "apiVersion": k.spec.schema.apiVersion,
                           "kind": k.spec.schema.kind,
                           "metadata": {
                             "name": instance.metadata.name,
-                            "namespace": has(instance.metadata.namespace) ? instance.metadata.namespace : ""
+                            "namespace": instance.metadata.?namespace.orValue("")
                           },
                           "status": k.spec.schema.status
-                        }}] : [])
+                        }}]
                     }}
 
             - id: kindCount
