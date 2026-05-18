@@ -232,7 +232,7 @@ resource key components as additional DNS labels before the graph identity. A no
 `config` produces `config.mygraph.default.internal.kro.run/type`. The label prefix is a DNS
 subdomain (253-character limit); non-forEach node IDs and namespaces are single DNS labels (no
 dots). Graph names are DNS subdomains and may contain dots to express hierarchy (e.g.,
-`rgd.webapps.default-myapp`). Parsing is unambiguous because the first segment (nodeID) and last
+`rgd.webapps.myapp`). Parsing is unambiguous because the first segment (nodeID) and last
 segment (namespace) are guaranteed dot-free. forEach children extend the prefix with additional
 labels. Uniqueness is across the full resource key (GVK + namespace + name). If the rendered key
 changes, that's a new child — the old one is a prune candidate. Resource keys must be unique across

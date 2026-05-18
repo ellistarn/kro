@@ -107,7 +107,7 @@ Every resource written by a `template:` or `patch:` carries two labels per Graph
     <node>.<graph>.<ns>.internal.kro.run/generation = <graph.metadata.generation>
 
 Node IDs and namespaces are DNS labels (no dots). Graph names are DNS subdomains and may contain
-dots to express hierarchy (e.g., `rgd.webapps.default-myapp`). Parsing is unambiguous: the first
+dots to express hierarchy (e.g., `rgd.webapps.myapp`). Parsing is unambiguous: the first
 segment is the nodeID, the last segment is the namespace, and everything between is the graph name.
 
 Stamped before every apply. Each Graph gets its own label key — multiple Graphs targeting the same

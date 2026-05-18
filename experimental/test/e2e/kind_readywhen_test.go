@@ -104,7 +104,7 @@ func TestStdlibKindNodeReadyWhenNotSatisfied(t *testing.T) {
 	assert.Equal(t, "pending", data["status"])
 
 	// Per-instance Graph should be NotReady (node readyWhen unsatisfied).
-	graphName := "kind.nodereadywhen.kro-system-nrw-inst"
+	graphName := "kind.nodereadywhen.nrw-inst"
 	require.NoError(t, waitForGraphReadyStatus(ctx, k8sClient,
 		types.NamespacedName{Name: graphName, Namespace: "kro-system"}, "Unknown", stdlibReconcileTimeout),
 		"per-instance Graph should be NotReady")
@@ -175,7 +175,7 @@ func TestStdlibKindNodeReadyWhenSatisfied(t *testing.T) {
 	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), instance) })
 
 	// Per-instance Graph should be Ready.
-	graphName := "kind.nodereadywhenok.kro-system-nrwok-inst"
+	graphName := "kind.nodereadywhenok.nrwok-inst"
 	require.NoError(t, waitForGraphReady(ctx, k8sClient,
 		types.NamespacedName{Name: graphName, Namespace: "kro-system"}, stdlibReconcileTimeout),
 		"per-instance Graph should be Ready")
@@ -251,7 +251,7 @@ func TestStdlibKindDefaultBehavior(t *testing.T) {
 	data, _, _ := unstructured.NestedStringMap(cm.Object, "data")
 	assert.Equal(t, "default-test", data["value"])
 
-	graphName := "kind.defaultbehaviorthing.kro-system-db-inst"
+	graphName := "kind.defaultbehaviorthing.db-inst"
 	require.NoError(t, waitForGraphReady(ctx, k8sClient,
 		types.NamespacedName{Name: graphName, Namespace: "kro-system"}, stdlibReconcileTimeout),
 		"per-instance Graph should be Ready")
@@ -413,7 +413,7 @@ func TestStdlibKindReadyDecoupledFromInstances(t *testing.T) {
 		"ConfigMap not created")
 
 	// Verify the per-instance Graph is NOT ready (node readyWhen unsatisfied).
-	instanceGraphName := "kind.decoupledready.kro-system-dr-inst"
+	instanceGraphName := "kind.decoupledready.dr-inst"
 	require.NoError(t, waitForGraphReadyStatus(ctx, k8sClient,
 		types.NamespacedName{Name: instanceGraphName, Namespace: "kro-system"}, "Unknown", stdlibReconcileTimeout),
 		"per-instance Graph should be NotReady (readyWhen unsatisfied)")

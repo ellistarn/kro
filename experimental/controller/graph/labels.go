@@ -12,7 +12,7 @@
 //
 // DNS subdomain format (253-character limit) requires that node IDs and
 // namespaces are DNS labels (no dots). Graph names may contain dots (they
-// are DNS subdomains) to express hierarchy — e.g., "rgd.webapps.default-myapp".
+// are DNS subdomains) to express hierarchy — e.g., "rgd.webapps.myapp".
 // Parsing is unambiguous because the first segment (nodeID) and last segment
 // (namespace) are guaranteed dot-free.
 package graph
