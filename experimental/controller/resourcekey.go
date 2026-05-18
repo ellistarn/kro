@@ -83,8 +83,12 @@ func defaultNamespace(gvk schema.GroupVersionKind, ns string, fallback string, s
 // Key is identity (group/version/Kind/namespace/name); NodeType and HasStatus
 // are cleanup dispatch metadata — NodeType determines delete vs release,
 // HasStatus determines whether release must also target the status subresource.
+// NodeID is the DAG node identifier — populated from identity labels on
+// managed resources. Required for mapping runtime keys back to DAG nodes
+// when staticResourceKey cannot resolve CEL-computed names.
 type Applied struct {
 	Key       string
+	NodeID    string
 	NodeType  graphpkg.NodeType
 	HasStatus bool
 }

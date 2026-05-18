@@ -1155,3 +1155,151 @@ func TestPatchFinalizes(t *testing.T) {
 		"patch fields should be released after finalization cleanup")
 	t.Log("External ConfigMap data.finalized is not 'true' — patch fields released via SSA")
 }
+
+// TestFinalizesOnTeardownDynamicName proves that finalization runs correctly
+// during teardown when the target node has a CEL-computed name.
+//
+// This is a regression test for a bug where the keyToNodeID bridge was built
+// exclusively from staticResourceKey(), which returns "" for any node whose
+// metadata.name contains a CEL expression. The result was that
+// advanceFinalization could never map the runtime resource key back to a DAG
+// node ID, so it skipped finalization entirely — the target was deleted
+// immediately without creating or awaiting the finalizer resource.
+//
+// The test creates a Graph with:
+//   - source: static-name ConfigMap providing a name prefix
+//   - target: CEL-named ConfigMap (name = "${source.data.prefix}-target")
+//     with a gate field (data.gate = "closed")
+//   - snapshot: template finalizer for target, readyWhen gated on target's
+//     own data (${target.data.gate == 'open'})
+//
+// On teardown:
+//   - With the bug: target deleted immediately (~100ms), snapshot never created
+//   - Fixed: snapshot created, blocks on gate, target survives until gate opened
+func TestFinalizesOnTeardownDynamicName(t *testing.T) {
+	t.Parallel()
+	ns := createNamespace(t)
+
+	cmGVK := schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"}
+
+	// Phase 1: Create the Graph.
+	graph := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "experimental.kro.run/v1alpha1",
+			"kind":       "Graph",
+			"metadata": map[string]any{
+				"name":      "test-fin-teardown-dynamic",
+				"namespace": ns,
+			},
+			"spec": map[string]any{
+				"nodes": []any{
+					map[string]any{
+						"id": "source",
+						"template": map[string]any{
+							"apiVersion": "v1",
+							"kind":       "ConfigMap",
+							"metadata":   map[string]any{"name": "fin-dyn-source"},
+							"data":       map[string]any{"prefix": "dyn"},
+						},
+					},
+					map[string]any{
+						"id": "target",
+						"template": map[string]any{
+							"apiVersion": "v1",
+							"kind":       "ConfigMap",
+							"metadata":   map[string]any{"name": "${source.data.prefix}-target"},
+							"data":       map[string]any{"gate": "closed", "value": "important"},
+						},
+					},
+					map[string]any{
+						"id":        "snapshot",
+						"finalizes": "target",
+						"readyWhen": []any{"${target.data.gate == 'open'}"},
+						"template": map[string]any{
+							"apiVersion": "v1",
+							"kind":       "ConfigMap",
+							"metadata":   map[string]any{"name": "fin-dyn-snapshot"},
+							"data":       map[string]any{"captured": "${target.data.value}"},
+						},
+					},
+				},
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, graph))
+
+	// Wait for target to be created (its runtime name is "dyn-target").
+	targetCM := &unstructured.Unstructured{}
+	targetCM.SetGroupVersionKind(cmGVK)
+	require.NoError(t, waitForResource(ctx, k8sClient,
+		types.NamespacedName{Name: "dyn-target", Namespace: ns}, targetCM))
+	require.NoError(t, waitForGraphReady(ctx, k8sClient,
+		types.NamespacedName{Name: "test-fin-teardown-dynamic", Namespace: ns}))
+	t.Log("Phase 1: Graph ready — source and target created, snapshot dormant")
+
+	// Snapshot must NOT exist during normal operation.
+	snapshotCheck := &unstructured.Unstructured{}
+	snapshotCheck.SetGroupVersionKind(cmGVK)
+	err := k8sClient.Get(ctx,
+		types.NamespacedName{Name: "fin-dyn-snapshot", Namespace: ns}, snapshotCheck)
+	require.True(t, apierrors.IsNotFound(err),
+		"snapshot must not exist during normal operation")
+
+	// Phase 2: Delete the Graph — trigger teardown.
+	latestGraph := &unstructured.Unstructured{}
+	latestGraph.SetGroupVersionKind(GraphGVK)
+	require.NoError(t, k8sClient.Get(ctx,
+		types.NamespacedName{Name: "test-fin-teardown-dynamic", Namespace: ns}, latestGraph))
+	require.NoError(t, k8sClient.Delete(ctx, latestGraph))
+	t.Log("Phase 2: Graph deleted — teardown started")
+
+	// The finalization gate is closed (target.data.gate == "closed"), so
+	// teardown must be blocked. The target must survive.
+	//
+	// Wait for the snapshot to appear — proves finalization actually fired.
+	// BUG: without the fix, the snapshot is never created because
+	// advanceFinalization cannot map the CEL-named target's runtime key
+	// back to its DAG node ID.
+	snapshotCM := &unstructured.Unstructured{}
+	snapshotCM.SetGroupVersionKind(cmGVK)
+	require.NoError(t, waitForResource(ctx, k8sClient,
+		types.NamespacedName{Name: "fin-dyn-snapshot", Namespace: ns}, snapshotCM),
+		"snapshot must be created during finalization (proves advanceFinalization ran)")
+	t.Log("Phase 2: Snapshot created — finalization is running")
+
+	// Target must still exist — readyWhen not yet satisfied.
+	checkTarget := &unstructured.Unstructured{}
+	checkTarget.SetGroupVersionKind(cmGVK)
+	require.NoError(t, k8sClient.Get(ctx,
+		types.NamespacedName{Name: "dyn-target", Namespace: ns}, checkTarget),
+		"target must still exist — finalization gate (target.data.gate == 'open') is closed")
+	t.Log("Phase 2: Target confirmed alive — gate holding")
+
+	// Phase 3: Open the gate by updating the target's data.
+	// During finalization the controller re-GETs the target each cycle,
+	// so our external update will be observed on the next reconcile.
+	require.NoError(t, updateWithRetry(ctx, k8sClient, cmGVK,
+		types.NamespacedName{Name: "dyn-target", Namespace: ns}, func(obj *unstructured.Unstructured) {
+			unstructured.SetNestedField(obj.Object, "open", "data", "gate")
+		}))
+	t.Log("Phase 3: Gate opened — target.data.gate = 'open'")
+
+	// Target must now be deleted (readyWhen satisfied → finalization complete).
+	require.NoError(t, waitForDeletion(ctx, k8sClient, cmGVK,
+		types.NamespacedName{Name: "dyn-target", Namespace: ns}))
+	t.Log("Phase 3: Target deleted — finalization sequence completed")
+
+	// Graph teardown should complete (all resources gone, finalizer removed).
+	require.NoError(t, waitForDeletion(ctx, k8sClient, GraphGVK,
+		types.NamespacedName{Name: "test-fin-teardown-dynamic", Namespace: ns}))
+	t.Log("Phase 3: Graph fully deleted — teardown complete")
+
+	// Snapshot should be cleaned up after target deletion.
+	cleanupCheck := &unstructured.Unstructured{}
+	cleanupCheck.SetGroupVersionKind(cmGVK)
+	err = k8sClient.Get(ctx,
+		types.NamespacedName{Name: "fin-dyn-snapshot", Namespace: ns}, cleanupCheck)
+	assert.True(t, apierrors.IsNotFound(err),
+		"snapshot must be cleaned up after teardown")
+	t.Log("Snapshot cleaned up — full finalization lifecycle verified")
+}

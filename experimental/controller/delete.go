@@ -194,6 +194,7 @@ func (r *GraphReconciler) collectTeardownKeys(ctx context.Context, cluster *clus
 			}
 			allKeys[key] = Applied{
 				Key:       key,
+				NodeID:    entry.NodeID,
 				NodeType:  entry.NodeType,
 				HasStatus: hasStatus,
 			}
