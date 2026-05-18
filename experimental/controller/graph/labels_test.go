@@ -81,9 +81,9 @@ func TestGraphNameFromLabel(t *testing.T) {
 			wantGraph: "rgd.webapps",
 		},
 		{
-			name:      "deeply dotted graph name",
-			key:       "deploy.rgd.webapps.default-myapp.kro-system.internal.kro.run/type",
-			wantGraph: "rgd.webapps.default-myapp",
+			name:      "three-segment graph name",
+			key:       "deploy.rgd.webapps.myapp.kro-system.internal.kro.run/type",
+			wantGraph: "rgd.webapps.myapp",
 		},
 		{
 			name:      "forEach child identity label",

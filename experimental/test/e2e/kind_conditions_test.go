@@ -292,7 +292,7 @@ func TestKindConditionsDecoupledFromInstances(t *testing.T) {
 		types.NamespacedName{Name: "cd-inst-decouple", Namespace: "kro-system"}, cm, stdlibReconcileTimeout))
 
 	// Verify the per-instance Graph is NOT ready.
-	instanceGraphName := "kind.conddecouple.kro-system-cd-inst"
+	instanceGraphName := "kind.conddecouple.cd-inst"
 	require.NoError(t, waitForGraphReadyStatus(ctx, k8sClient,
 		types.NamespacedName{Name: instanceGraphName, Namespace: "kro-system"}, "Unknown", stdlibReconcileTimeout),
 		"per-instance Graph should be NotReady")

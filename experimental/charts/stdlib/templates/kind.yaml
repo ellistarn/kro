@@ -134,11 +134,7 @@ spec:
                 apiVersion: experimental.kro.run/v1alpha1
                 kind: Graph
                 metadata:
-                  name: >-
-                    ${${"kind." + k.metadata.name + "."
-                    + (instance.metadata.?namespace.orValue("") != ""
-                    ? instance.metadata.namespace + "-" : "")
-                    + instance.metadata.name}}
+                  name: ${${"kind." + k.metadata.name + "." + instance.metadata.name}}
                   namespace: '${${k.spec.scope == "Namespaced" ? instance.metadata.namespace : "kro-system"}}'
                 spec:
                   nodes: >-
