@@ -292,14 +292,17 @@ func prepareObject(evalMap map[string]any, rs *reconcileScope, nodeID string, no
 		// children stamp their own child-scoped labels before calling applySSA).
 		if !graphpkg.HasGraphIdentityLabels(lbls, rs.name, rs.namespace) {
 			lbls = graphpkg.SetIdentityLabels(lbls, nodeID, rs.name, rs.namespace, generationStr, graphpkg.NodeTypeTemplate)
-			obj.SetLabels(lbls)
 		}
+		// Stamp public graph labels on template nodes only. Patches skip these
+		// to avoid SSA conflicts when multiple graphs target the same resource
+		// (the template graph is the lifecycle owner; patches are contributors).
+		lbls = graphpkg.SetGraphLabels(lbls, rs.name, rs.namespace)
 	} else {
 		// Patch: always stamp identity labels so resources are discoverable via
 		// deriveAppliedSet() after controller restart.
 		lbls = graphpkg.SetIdentityLabels(lbls, nodeID, rs.name, rs.namespace, generationStr, graphpkg.NodeTypePatch)
-		obj.SetLabels(lbls)
 	}
+	obj.SetLabels(lbls)
 
 	return obj, nil
 }
