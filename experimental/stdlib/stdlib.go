@@ -118,9 +118,9 @@ var fileOrder = []struct {
 	fs   fs.FS
 }{
 	{"templates/kind.yaml", chartstdlib.Templates},
-	{"decorator.yaml", resources},
+	{"decorator.yaml", resources}, // TODO: migrate to charts/stdlib/templates/
 	{"templates/singleton.yaml", chartstdlib.Templates},
-	{"rgd.yaml", resources},
+	{"rgd.yaml", resources}, // TODO: migrate to charts/stdlib/templates/
 }
 
 func loadResources() ([]resource, error) {
