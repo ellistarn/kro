@@ -96,52 +96,55 @@ func (ps *PlanState) SetState(id string, state NodeState) {
 }
 
 // PlanSummary holds aggregate state from a completed DAG propagation.
+// Node ID slices identify which resources are in each state, giving
+// condition messages the specificity operators need for triage.
 type PlanSummary struct {
-	HasPending     bool
-	HasNotReady    bool
-	HasBlocked     bool
-	HasConflict    bool
-	HasError       bool
-	HasSystemError bool
-	ReadyCount     int
+	PendingNodes     []string
+	NotReadyNodes    []string
+	BlockedNodes     []string
+	ConflictNodes    []string
+	ErrorNodes       []string
+	SystemErrorNodes []string
+	ReadyCount       int
 }
 
 // HasUncertainty reports whether any node state creates uncertainty about
 // which resources should exist. Per 005-reconciliation.md: "Uncertain absence
 // blocks pruning — the resource might reappear once the blocker resolves."
 func (s PlanSummary) HasUncertainty() bool {
-	return s.HasPending || s.HasBlocked || s.HasError || s.HasSystemError
+	return len(s.PendingNodes) > 0 || len(s.BlockedNodes) > 0 || len(s.ErrorNodes) > 0 || len(s.SystemErrorNodes) > 0
 }
 
 // IsClean reports whether all nodes have converged with no errors or pending
 // states. Used to determine if superseded revisions can be garbage collected.
 func (s PlanSummary) IsClean() bool {
-	return !s.HasPending && !s.HasNotReady && !s.HasBlocked && !s.HasConflict && !s.HasError && !s.HasSystemError
+	return len(s.PendingNodes) == 0 && len(s.NotReadyNodes) == 0 && len(s.BlockedNodes) == 0 &&
+		len(s.ConflictNodes) == 0 && len(s.ErrorNodes) == 0 && len(s.SystemErrorNodes) == 0
 }
 
 // Summary returns aggregate state for status reporting.
 func (ps *PlanState) Summary() PlanSummary {
 	var s PlanSummary
-	for _, state := range ps.States {
+	for id, state := range ps.States {
 		switch state {
 		case NodeReady:
 			s.ReadyCount++
 		case NodeNotReady:
-			s.HasNotReady = true
+			s.NotReadyNodes = append(s.NotReadyNodes, id)
 		case NodePending:
-			s.HasPending = true
+			s.PendingNodes = append(s.PendingNodes, id)
 		case NodeBlocked:
-			s.HasBlocked = true
+			s.BlockedNodes = append(s.BlockedNodes, id)
 		case NodeExcluded:
 			// Counted but not surfaced — excluded nodes propagate through
 			// the DAG via contagious exclusion and are observable in
 			// per-node status, not the aggregate summary.
 		case NodeError:
-			s.HasError = true
+			s.ErrorNodes = append(s.ErrorNodes, id)
 		case NodeSystemError:
-			s.HasSystemError = true
+			s.SystemErrorNodes = append(s.SystemErrorNodes, id)
 		case NodeConflict:
-			s.HasConflict = true
+			s.ConflictNodes = append(s.ConflictNodes, id)
 		}
 	}
 	return s

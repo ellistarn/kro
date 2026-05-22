@@ -90,8 +90,8 @@ func TestSummaryCountsBlockedState(t *testing.T) {
 	plan.SetState("b", NodeBlocked)
 
 	summary := plan.Summary()
-	assert.True(t, summary.HasError, "should report error on the source node")
-	assert.True(t, summary.HasBlocked, "should report blocked on the dependent node")
+	assert.NotEmpty(t, summary.ErrorNodes, "should report error on the source node")
+	assert.NotEmpty(t, summary.BlockedNodes, "should report blocked on the dependent node")
 	assert.Equal(t, 0, summary.ReadyCount)
 }
 
@@ -900,8 +900,8 @@ func TestDeriveReadyCondition_BlockedBeforePending(t *testing.T) {
 	state := &reconcileState{
 		compiled: true,
 		planSummary: PlanSummary{
-			HasPending: true,
-			HasBlocked: true,
+			PendingNodes: []string{"deploy"},
+			BlockedNodes: []string{"svc"},
 		},
 	}
 	outcome := state.deriveReadyCondition()
@@ -916,7 +916,7 @@ func TestDeriveReadyCondition_BlockedBeforePending(t *testing.T) {
 func TestDeriveReadyCondition_PendingSurfacesReasons(t *testing.T) {
 	s := &reconcileState{
 		compiled:    true,
-		planSummary: PlanSummary{HasPending: true},
+		planSummary: PlanSummary{PendingNodes: []string{"deploy"}},
 		nodeErrors:  []string{"deploy: waiting for input from cfg"},
 	}
 	outcome := s.deriveReadyCondition()
