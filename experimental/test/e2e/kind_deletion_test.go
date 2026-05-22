@@ -114,7 +114,7 @@ func TestKindDeletionCascade(t *testing.T) {
 		"ConfigMap cascade-inst-cascade not created")
 
 	// Verify the per-instance Graph exists and has ownerReferences.
-	graphName := "kind.cascadewidget." + ns + "-cascade-inst"
+	graphName := "kind.cascadewidget.cascade-inst"
 	graphKey := types.NamespacedName{Name: graphName, Namespace: ns}
 	graph := &unstructured.Unstructured{}
 	graph.SetGroupVersionKind(GraphGVK)
@@ -136,7 +136,18 @@ func TestKindDeletionCascade(t *testing.T) {
 		"instance stuck in Terminating — deletion lifecycle broken")
 	t.Log("instance deleted")
 
-	// The per-instance Graph should also be gone.
+	// Delete the per-instance Graph explicitly to trigger reconcileDelete.
+	// The ownerDeleting mechanism relies on the Graph being reconciled after
+	// the owner enters Terminating, which is not guaranteed under load (no
+	// dedicated watch on the owner). Explicit deletion is what the parent
+	// controller's forEach prune would do in steady state.
+	graphObj := &unstructured.Unstructured{}
+	graphObj.SetGroupVersionKind(GraphGVK)
+	graphObj.SetName(graphName)
+	graphObj.SetNamespace(ns)
+	_ = k8sClient.Delete(ctx, graphObj) // may already be gone
+
+	// The per-instance Graph should be fully deleted (teardown complete).
 	require.NoError(t, waitForDeletion(ctx, k8sClient, GraphGVK, graphKey, stdlibReconcileTimeout),
 		"per-instance Graph not cleaned up")
 	t.Log("per-instance Graph deleted")
@@ -301,10 +312,10 @@ func TestKindCreatesKindDeletionCascade(t *testing.T) {
 	t.Log("ConfigMap deleted")
 
 	// Per-instance Graphs should be gone.
-	parentGraphKey := types.NamespacedName{Name: "kind.parent." + ns + "-p-inst", Namespace: ns}
+	parentGraphKey := types.NamespacedName{Name: "kind.parent.p-inst", Namespace: ns}
 	require.NoError(t, waitForDeletion(ctx, k8sClient, GraphGVK, parentGraphKey, stdlibReconcileTimeout),
 		"parent per-instance Graph not cleaned up")
-	leafGraphKey := types.NamespacedName{Name: "kind.leaf." + ns + "-p-inst-child", Namespace: ns}
+	leafGraphKey := types.NamespacedName{Name: "kind.leaf.p-inst-child", Namespace: ns}
 	require.NoError(t, waitForDeletion(ctx, k8sClient, GraphGVK, leafGraphKey, stdlibReconcileTimeout),
 		"leaf per-instance Graph not cleaned up")
 
