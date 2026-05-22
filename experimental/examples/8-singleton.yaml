@@ -1,6 +1,6 @@
 # Singleton — declare a resource that should exist exactly once.
 #
-# Implemented as a Kind (see stdlib/singleton.yaml). The Kind creates
+# Implemented as a Kind (see charts/stdlib/templates/singleton.yaml). The Kind creates
 # a shared resolution Graph that implements priority resolution across
 # all Singletons.
 #

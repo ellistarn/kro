@@ -119,7 +119,7 @@ var fileOrder = []struct {
 }{
 	{"templates/kind.yaml", chartstdlib.Templates},
 	{"decorator.yaml", resources},
-	{"singleton.yaml", resources},
+	{"templates/singleton.yaml", chartstdlib.Templates},
 	{"rgd.yaml", resources},
 }
 
