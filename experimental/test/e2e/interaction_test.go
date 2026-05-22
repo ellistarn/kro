@@ -1597,3 +1597,81 @@ func TestForEachForceApply(t *testing.T) {
 	}
 	t.Log("forEach with Force apply took ownership and evicted old managers — forEach + eviction proved")
 }
+
+// TestGraphLabelsOnTemplateResources proves that template-created resources
+// carry kro.run/graph-name and kro.run/graph-namespace labels, and that
+// patch-targeted resources do NOT carry them (avoiding SSA conflicts).
+func TestGraphLabelsOnTemplateResources(t *testing.T) {
+	t.Parallel()
+	ns := createNamespace(t)
+
+	// Pre-create a ConfigMap that the patch graph will target.
+	shared := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata":   map[string]any{"name": "patch-target", "namespace": ns},
+		"data":       map[string]any{"key": "value"},
+	}}
+	require.NoError(t, k8sClient.Create(ctx, shared))
+
+	// Graph A: template creates a new ConfigMap.
+	graphA := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "experimental.kro.run/v1alpha1",
+		"kind":       "Graph",
+		"metadata":   map[string]any{"name": "graph-labels-tmpl", "namespace": ns},
+		"spec": map[string]any{"nodes": []any{
+			map[string]any{"id": "cm", "template": map[string]any{
+				"apiVersion": "v1",
+				"kind":       "ConfigMap",
+				"metadata":   map[string]any{"name": "owned-by-a"},
+				"data":       map[string]any{"hello": "world"},
+			}},
+		}},
+	}}
+	require.NoError(t, k8sClient.Create(ctx, graphA))
+
+	// Graph B: patch writes an annotation to the pre-created ConfigMap.
+	graphB := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "experimental.kro.run/v1alpha1",
+		"kind":       "Graph",
+		"metadata":   map[string]any{"name": "graph-labels-patch", "namespace": ns},
+		"spec": map[string]any{"nodes": []any{
+			map[string]any{"id": "contrib", "patch": map[string]any{
+				"apiVersion": "v1",
+				"kind":       "ConfigMap",
+				"metadata":   map[string]any{"name": "patch-target", "annotations": map[string]any{"patched": "yes"}},
+			}},
+		}},
+	}}
+	require.NoError(t, k8sClient.Create(ctx, graphB))
+
+	// Wait for both graphs to converge.
+	require.NoError(t, waitForGraphReady(ctx, k8sClient,
+		types.NamespacedName{Name: "graph-labels-tmpl", Namespace: ns}))
+	require.NoError(t, waitForGraphReady(ctx, k8sClient,
+		types.NamespacedName{Name: "graph-labels-patch", Namespace: ns}))
+
+	// Template resource must carry graph labels.
+	tmplRes := &unstructured.Unstructured{}
+	tmplRes.SetGroupVersionKind(schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"})
+	require.NoError(t, k8sClient.Get(ctx,
+		types.NamespacedName{Name: "owned-by-a", Namespace: ns}, tmplRes))
+
+	labels := tmplRes.GetLabels()
+	assert.Equal(t, "graph-labels-tmpl", labels["kro.run/graph-name"],
+		"template resource must carry kro.run/graph-name")
+	assert.Equal(t, ns, labels["kro.run/graph-namespace"],
+		"template resource must carry kro.run/graph-namespace")
+
+	// Patch resource must NOT carry graph labels (avoids SSA conflict).
+	patchRes := &unstructured.Unstructured{}
+	patchRes.SetGroupVersionKind(schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"})
+	require.NoError(t, k8sClient.Get(ctx,
+		types.NamespacedName{Name: "patch-target", Namespace: ns}, patchRes))
+
+	patchLabels := patchRes.GetLabels()
+	assert.Empty(t, patchLabels["kro.run/graph-name"],
+		"patch resource must NOT carry kro.run/graph-name")
+	assert.Empty(t, patchLabels["kro.run/graph-namespace"],
+		"patch resource must NOT carry kro.run/graph-namespace")
+}

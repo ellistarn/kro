@@ -64,6 +64,12 @@ const (
 	// flat labels for simple selection. These are NOT the identity labels.
 	LabelRevisionGraphName = "internal.kro.run/graph-name"
 	LabelGraphGeneration   = "internal.kro.run/graph-generation"
+
+	// Public labels stamped on every managed resource. These provide a
+	// simple, stable selector for external tools to find all resources
+	// owned by a specific graph instance.
+	LabelGraphName      = "kro.run/graph-name"
+	LabelGraphNamespace = "kro.run/graph-namespace"
 )
 
 // nodeLabelPrefix returns the DNS subdomain prefix shared by identity and
@@ -234,6 +240,18 @@ func SetIdentityLabels(labels map[string]string, nodeID, graphName, namespace, g
 	}
 	labels[identityLabelKey(nodeID, graphName, namespace)] = lv
 	labels[generationLabelKey(nodeID, graphName, namespace)] = generation
+	return labels
+}
+
+// SetGraphLabels stamps the public graph-name and graph-namespace labels
+// onto a resource's label map. These labels provide a simple, stable
+// selector for external tools (e.g., kubectl get all -l kro.run/graph-name=x).
+func SetGraphLabels(labels map[string]string, graphName, namespace string) map[string]string {
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	labels[LabelGraphName] = LabelSafeGraphName(graphName)
+	labels[LabelGraphNamespace] = namespace
 	return labels
 }
 

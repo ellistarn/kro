@@ -101,6 +101,11 @@ co-ownership from forming, force removes it after the fact.
 
 ### Identity Labels
 
+Template resources carry flat graph labels for external selectors:
+
+    kro.run/graph-name      = <graph name>
+    kro.run/graph-namespace = <graph namespace>
+
 Every resource written by a `template:` or `patch:` carries two labels per Graph-node pair:
 
     <node>.<graph>.<ns>.internal.kro.run/type       = template | patch
