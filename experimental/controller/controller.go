@@ -451,7 +451,10 @@ func (r *GraphReconciler) reconcilePrune(
 	result.errors = append(result.errors, pr.BlockedReasons...)
 	result.notes = append(result.notes, pr.Notes...)
 	if len(pr.BlockedReasons) > 0 {
-		summary.HasBlocked = true
+		// "prune" is a synthetic node ID representing the prune lifecycle
+		// phase — not a DAG node. It appears in condition messages so
+		// operators can distinguish propagation failures from prune failures.
+		summary.BlockedNodes = append(summary.BlockedNodes, "prune")
 	}
 	deferredKeys := collectDeferredKeys(pr.Outcomes, allPreviousKeys)
 	if len(deferredKeys) > 0 {
@@ -463,11 +466,11 @@ func (r *GraphReconciler) reconcilePrune(
 		info := classifyAPIError(pr.Err)
 		switch info.state {
 		case NodeSystemError:
-			summary.HasSystemError = true
+			summary.SystemErrorNodes = append(summary.SystemErrorNodes, "prune")
 		case NodeConflict:
-			summary.HasConflict = true
+			summary.ConflictNodes = append(summary.ConflictNodes, "prune")
 		default:
-			summary.HasError = true
+			summary.ErrorNodes = append(summary.ErrorNodes, "prune")
 		}
 		result.errors = append(result.errors, fmt.Sprintf("prune: %s", info.reason))
 	}

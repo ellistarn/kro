@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -49,9 +50,10 @@ type reconcileState struct {
 	compiledErr error // non-nil when compiled=false
 
 	planSummary PlanSummary
-	// nodeErrors carries error messages ("nodeID: reason") surfaced when any
-	// of the HasX flags fire. These are the reason text for NotReady/Error/
-	// Blocked conditions.
+	// nodeErrors carries detailed error messages ("nodeID: reason") surfaced
+	// alongside the node ID lists in PlanSummary. These provide the reason text
+	// for NotReady/Error/Blocked conditions — the node lists name *which*
+	// resources, nodeErrors explain *why*.
 	nodeErrors []string
 	// nodeNotes carries informational messages that don't gate Ready — e.g.,
 	// FinalizerSkipped emitted during prune when the target resource was
@@ -106,48 +108,49 @@ func (s *reconcileState) deriveReadyCondition() conditionOutcome {
 	if !s.compiled {
 		return conditionOutcome{conditionFalse, "NotCompiled", "Spec is not valid; resources cannot be reconciled"}
 	}
-	if s.planSummary.HasSystemError {
-		return conditionOutcome{conditionFalse, "SystemError",
-			fmt.Sprintf("Resources with server/infrastructure errors: %s",
-				strings.Join(s.nodeErrors, "; "))}
-	}
-	if s.planSummary.HasError {
-		return conditionOutcome{conditionFalse, "Error",
-			fmt.Sprintf("Resources with errors: %s",
-				strings.Join(s.nodeErrors, "; "))}
-	}
-	if s.planSummary.HasConflict {
-		msg := "One or more resources have SSA field ownership conflicts"
+	if len(s.planSummary.SystemErrorNodes) > 0 {
+		msg := fmt.Sprintf("Resources with server/infrastructure errors: %s",
+			sortedJoin(s.planSummary.SystemErrorNodes))
 		if len(s.nodeErrors) > 0 {
-			msg += ": " + strings.Join(s.nodeErrors, "; ")
+			msg += " (" + strings.Join(s.nodeErrors, "; ") + ")"
+		}
+		return conditionOutcome{conditionFalse, "SystemError", msg}
+	}
+	if len(s.planSummary.ErrorNodes) > 0 {
+		msg := fmt.Sprintf("Resources with errors: %s",
+			sortedJoin(s.planSummary.ErrorNodes))
+		if len(s.nodeErrors) > 0 {
+			msg += " (" + strings.Join(s.nodeErrors, "; ") + ")"
+		}
+		return conditionOutcome{conditionFalse, "Error", msg}
+	}
+	if len(s.planSummary.ConflictNodes) > 0 {
+		msg := fmt.Sprintf("Resources with SSA field ownership conflicts: %s",
+			sortedJoin(s.planSummary.ConflictNodes))
+		if len(s.nodeErrors) > 0 {
+			msg += " (" + strings.Join(s.nodeErrors, "; ") + ")"
 		}
 		return conditionOutcome{conditionFalse, "Conflict", msg}
 	}
-	if s.planSummary.HasBlocked {
-		msg := "One or more resources blocked by upstream errors"
-		// Surface TeardownBlocked reasons (third-party field managers,
-		// finalizer creation failure, finalizer not ready) so operators can
-		// pick the right remediation. Per 005-reconciliation.md §
-		// Finalization, the three causes need different responses — collapsing
-		// them into one message is observability without actionability.
+	if len(s.planSummary.BlockedNodes) > 0 {
+		msg := fmt.Sprintf("Resources blocked by upstream errors: %s",
+			sortedJoin(s.planSummary.BlockedNodes))
 		if len(s.nodeErrors) > 0 {
 			msg += " (" + strings.Join(s.nodeErrors, "; ") + ")"
 		}
 		return conditionOutcome{conditionUnknown, "Blocked", msg}
 	}
-	if s.planSummary.HasPending {
-		msg := "One or more resources waiting for upstream data"
+	if len(s.planSummary.PendingNodes) > 0 {
+		msg := fmt.Sprintf("Resources waiting for upstream data: %s",
+			sortedJoin(s.planSummary.PendingNodes))
 		if len(s.nodeErrors) > 0 {
 			msg += " (" + strings.Join(s.nodeErrors, "; ") + ")"
 		}
 		return conditionOutcome{conditionUnknown, "Pending", msg}
 	}
-	if s.planSummary.HasNotReady {
-		msg := "One or more resources have not satisfied their readyWhen conditions"
-		// Surface readyWhen expression errors so operators can distinguish
-		// "waiting for Deployment to roll out" from "your CEL expression
-		// returns int64, expected bool." Without this, broken readyWhen
-		// expressions appear as transient NotReady with no actionable signal.
+	if len(s.planSummary.NotReadyNodes) > 0 {
+		msg := fmt.Sprintf("Resources not ready: %s",
+			sortedJoin(s.planSummary.NotReadyNodes))
 		if len(s.nodeErrors) > 0 {
 			msg += " (" + strings.Join(s.nodeErrors, "; ") + ")"
 		}
@@ -167,6 +170,16 @@ func (s *reconcileState) deriveReadyCondition() conditionOutcome {
 		msg += " (" + strings.Join(s.nodeNotes, "; ") + ")"
 	}
 	return conditionOutcome{conditionTrue, "Ready", msg}
+}
+
+// sortedJoin returns a deterministic comma-separated list of node IDs.
+// Sorting happens at consumption time (not in Summary()) because the prune
+// phase may append entries after Summary() returns.
+func sortedJoin(nodes []string) string {
+	sorted := make([]string, len(nodes))
+	copy(sorted, nodes)
+	sort.Strings(sorted)
+	return strings.Join(sorted, ", ")
 }
 
 // updateStatus writes the Graph's status subresource. Reads the latest version

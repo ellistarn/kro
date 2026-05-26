@@ -92,8 +92,10 @@ func (r *GraphReconciler) reconcileDelete(ctx context.Context, graph *unstructur
 					fmt.Sprintf("active revision compile failed: %s", teardownCompileErr))
 			}
 			if statusErr := r.updateStatus(ctx, graph, &reconcileState{
-				compiled:    true,
-				planSummary: PlanSummary{HasBlocked: true},
+				compiled: true,
+				// "teardown" is a synthetic node ID representing the delete
+				// lifecycle phase — not a DAG node.
+				planSummary: PlanSummary{BlockedNodes: []string{"teardown"}},
 				nodeErrors:  nodeErrors,
 				nodeNotes:   pr.Notes,
 			}); statusErr != nil {
