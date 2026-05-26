@@ -43,7 +43,8 @@ import (
 // TestKindDeletionCascade verifies that deleting a Kind instance triggers
 // ordered teardown of all managed resources via the finalizer lifecycle.
 func TestKindDeletionCascade(t *testing.T) {
-	t.Parallel()
+	// Not parallel: multi-level Kind cascade (Kind→instance→Graph→resource)
+	// with inter-dependent finalizers is slow under parallel load.
 	require.NoError(t, waitForCRD(ctx, k8sClient, "kinds.experimental.kro.run", stdlibCRDTimeout))
 
 	// Phase 1: Create a Kind that defines a resource (ConfigMap).
@@ -163,7 +164,8 @@ func TestKindDeletionCascade(t *testing.T) {
 // a parent Kind instance creates a child Kind instance, and deleting the
 // parent blocks until the child's entire subtree is torn down.
 func TestKindCreatesKindDeletionCascade(t *testing.T) {
-	t.Parallel()
+	// Not parallel: 5-hop finalizer unwind (parent Kind→child Kind→Graph→
+	// resource) is the deepest cascade and slowest under parallel load.
 	require.NoError(t, waitForCRD(ctx, k8sClient, "kinds.experimental.kro.run", stdlibCRDTimeout))
 
 	ns := "kro-system"
