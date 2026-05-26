@@ -361,7 +361,8 @@ func TestDynamicResourceListViaCEL(t *testing.T) {
 // This test pre-installs the RGD CRD (that would normally be created by L0) and
 // focuses on proving the full reactive chain: RGD → CRD → instance → resources → status.
 func TestFullRGDSystemL0L1L2(t *testing.T) {
-	t.Parallel()
+	// Not parallel: L0→L1→L2 cascade requires many sequential reconcile
+	// cycles; under parallel load the controller queue saturates.
 	ns := createNamespace(t)
 	group := uniqueGroup()
 
@@ -511,7 +512,9 @@ func TestFullRGDSystemL0L1L2(t *testing.T) {
 // This uses the same L0 Graph as TestFullRGDSystemL0L1L2 (the rgd-controller pattern)
 // but with a Deployment resource instead of a ConfigMap.
 func TestRGDLifecyclePort(t *testing.T) {
-	t.Parallel()
+	// Not parallel: this multi-level cascade (L0→L1→L2→Deployment) requires
+	// multiple sequential reconcile cycles. Under parallel test load the
+	// controller queue saturates and the deletion cascade exceeds its timeout.
 	ns := createNamespace(t)
 	group := uniqueGroup()
 
@@ -704,7 +707,8 @@ func TestRGDLifecyclePort(t *testing.T) {
 	require.NoError(t, k8sClient.Delete(ctx, toDelete))
 
 	// Verify Deployment is cleaned up (L2 finalizer deletes it).
-	// Multi-level cascade cleanup can take longer under parallel test load.
+	// Multi-level cascade: instance deletion → L1 prunes L2 Graph → L2
+	// finalizer tears down Deployment.
 	require.NoError(t, waitForDeletion(ctx, k8sClient, deployGVK,
 		types.NamespacedName{Name: "deployment-test-instance-for-updates", Namespace: ns}, 60*time.Second))
 	t.Log("Deployment deleted after instance deletion — cascade cleanup proved")
