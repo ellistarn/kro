@@ -2,6 +2,7 @@ package graphcontroller_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -209,9 +210,9 @@ func TestOwnerRef_TeardownOnOwnerDeletion(t *testing.T) {
 }
 
 // TestOwnerRef_OwnerGoneBeforeGraph exercises the race window: if the
-// owner is deleted before the Graph is created, the patch node targeting
-// the owner stays Pending (target doesn't exist). The Graph still
-// reconciles its other nodes normally — it's effectively orphaned.
+// owner is deleted before the Graph is created, ownerDeleting() detects
+// the owner is gone (NotFound) and self-deletes the Graph before it can
+// materialize managed resources.
 func TestOwnerRef_OwnerGoneBeforeGraph(t *testing.T) {
 	t.Parallel()
 	ns := createNamespace(t)
@@ -240,9 +241,8 @@ func TestOwnerRef_OwnerGoneBeforeGraph(t *testing.T) {
 		schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"},
 		types.NamespacedName{Name: "race-owner", Namespace: ns}))
 
-	// Create Graph pointing to the now-gone owner. The lifecycle patch
-	// can't find its target so stays Pending. ownerDeleting() can't GET
-	// the owner so returns false. The Graph reconciles normally.
+	// Create Graph pointing to the now-gone owner. ownerDeleting() will
+	// detect the owner is NotFound and trigger self-deletion.
 	graph := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "experimental.kro.run/v1alpha1",
@@ -292,16 +292,143 @@ func TestOwnerRef_OwnerGoneBeforeGraph(t *testing.T) {
 	}
 	require.NoError(t, k8sClient.Create(ctx, graph))
 
-	// The managed resource (child) should still be created even though
-	// the lifecycle patch is Pending (owner is gone).
+	// The Graph should self-delete because its owner is already gone.
+	require.NoError(t, waitForDeletion(ctx, k8sClient, GraphGVK,
+		types.NamespacedName{Name: "test-race", Namespace: ns}, 15*time.Second),
+		"Graph should self-delete when owner is already gone")
+
+	// The child should not persist (either never created, or cleaned up by teardown).
 	childCM := &unstructured.Unstructured{}
 	childCM.SetGroupVersionKind(schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"})
-	require.NoError(t, waitForResource(ctx, k8sClient,
-		types.NamespacedName{Name: "race-child", Namespace: ns}, childCM),
-		"managed resource should be created despite lifecycle patch being Pending")
+	err := k8sClient.Get(ctx, types.NamespacedName{Name: "race-child", Namespace: ns}, childCM)
+	assert.True(t, apierrors.IsNotFound(err),
+		"managed child should not persist when Graph self-deletes for gone owner")
+}
 
-	// Cleanup.
-	require.NoError(t, k8sClient.Delete(ctx, graph))
+// TestOwnerRef_OwnerDisappearsAfterReady reproduces the leaked-Graph bug:
+// if an owner is force-deleted (e.g., finalizer stripped externally) and
+// disappears before the Graph controller reconciles, ownerDeleting() sees
+// NotFound on the GET and returns false. The Graph never self-deletes, its
+// finalizer prevents GC from cleaning it, and managed resources leak.
+//
+// Correct behavior: ownerDeleting() should treat NotFound as "owner is gone"
+// (equivalent to Terminating) and self-delete the Graph.
+func TestOwnerRef_OwnerDisappearsAfterReady(t *testing.T) {
+	t.Parallel()
+	ns := createNamespace(t)
+
+	// Step 1: Create the owner.
+	owner := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata": map[string]any{
+				"name":      "disappear-owner",
+				"namespace": ns,
+			},
+			"data": map[string]any{"key": "value"},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, owner))
+	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: "disappear-owner", Namespace: ns}, owner))
+
+	// Step 2: Create Graph with ownerReference + lifecycle patch + managed child.
+	graph := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "experimental.kro.run/v1alpha1",
+			"kind":       "Graph",
+			"metadata": map[string]any{
+				"name":      "test-disappear",
+				"namespace": ns,
+				"ownerReferences": []any{
+					map[string]any{
+						"apiVersion":         "v1",
+						"kind":               "ConfigMap",
+						"name":               "disappear-owner",
+						"uid":                string(owner.GetUID()),
+						"controller":         true,
+						"blockOwnerDeletion": true,
+					},
+				},
+			},
+			"spec": map[string]any{
+				"nodes": []any{
+					map[string]any{
+						"id": "lifecycle",
+						"patch": map[string]any{
+							"apiVersion": "v1",
+							"kind":       "ConfigMap",
+							"metadata": map[string]any{
+								"name":       "disappear-owner",
+								"namespace":  ns,
+								"finalizers": []any{"experimental.kro.run/graph"},
+							},
+						},
+					},
+					map[string]any{
+						"id": "child",
+						"template": map[string]any{
+							"apiVersion": "v1",
+							"kind":       "ConfigMap",
+							"metadata": map[string]any{
+								"name": "disappear-child",
+							},
+							"data": map[string]any{"managed": "true"},
+						},
+					},
+				},
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, graph))
+
+	// Step 3: Wait for the Graph to become ready (proving the normal flow works).
+	require.NoError(t, waitForGraphReady(ctx, k8sClient,
+		types.NamespacedName{Name: "test-disappear", Namespace: ns}),
+		"Graph should become ready")
+
+	// Verify the owner got the finalizer from the patch node.
+	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: "disappear-owner", Namespace: ns}, owner))
+	require.True(t, controllerutil.ContainsFinalizer(owner, "experimental.kro.run/graph"),
+		"owner should have the graph finalizer before force-removal")
+
+	// Verify managed child exists.
+	child := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "ConfigMap"}}
+	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: "disappear-child", Namespace: ns}, child))
+
+	// Step 4: Force-remove the finalizer from the owner (simulating the race
+	// where the finalizer is stripped by another controller or external tool).
+	require.NoError(t, updateWithRetry(ctx, k8sClient,
+		schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"},
+		types.NamespacedName{Name: "disappear-owner", Namespace: ns},
+		func(obj *unstructured.Unstructured) {
+			controllerutil.RemoveFinalizer(obj, "experimental.kro.run/graph")
+		}))
+
+	// Step 5: Delete the owner. It completes immediately (no finalizer holds it).
+	require.NoError(t, k8sClient.Delete(ctx, owner, &client.DeleteOptions{
+		GracePeriodSeconds: ptr.To(int64(0)),
+	}))
+	cmGVK := schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}
+	require.NoError(t, waitForDeletion(ctx, k8sClient, cmGVK,
+		types.NamespacedName{Name: "disappear-owner", Namespace: ns}),
+		"owner should be deleted immediately after finalizer removal")
+
+	// Step 6: The Graph should detect that its owner is gone and self-delete,
+	// triggering reconcileDelete which cleans up managed resources and removes
+	// the Graph's own finalizer.
+	//
+	// BUG: ownerDeleting() at delete.go:289 does `continue` on NotFound,
+	// so it returns false when the owner is already gone. The Graph never
+	// self-deletes. This assertion will fail until the bug is fixed.
+	require.NoError(t, waitForDeletion(ctx, k8sClient, GraphGVK,
+		types.NamespacedName{Name: "test-disappear", Namespace: ns}, 15*time.Second),
+		"Graph should self-delete when owner disappears (ownerDeleting bug)")
+
+	// After Graph teardown, the managed child should also be gone.
+	err := k8sClient.Get(ctx, types.NamespacedName{Name: "disappear-child", Namespace: ns}, child)
+	assert.True(t, apierrors.IsNotFound(err),
+		"managed child should be cleaned up by Graph teardown, got: %v", err)
 }
 
 // TestOwnerRef_ManagedResourcesGoneBeforeOwnerReleased verifies that
