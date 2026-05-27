@@ -121,3 +121,64 @@ func TestSimpleSchemaToOpenAPI_WithSpecFields(t *testing.T) {
 	assert.Contains(t, specProps, "replicas")
 	assert.Contains(t, specProps, "image")
 }
+
+// ---------------------------------------------------------------------------
+// Singleton identity formula tests
+//
+// The singleton uses an identity string to match peers targeting the same
+// resource. The formula must handle both namespaced and cluster-scoped
+// targets. For cluster-scoped resources, metadata.namespace is absent from
+// the stored map entirely (not empty string — absent), so has() is required
+// to avoid a CEL "no such key" runtime error.
+// ---------------------------------------------------------------------------
+
+func TestSingletonIdentityFormula(t *testing.T) {
+	env, err := cel.NewEnv(cel.Variable("s", cel.DynType))
+	require.NoError(t, err)
+
+	// Same formula used in singleton.yaml for both identities[] and identity.value
+	expr := `s.apiVersion
+		+ (has(s.metadata.namespace)
+		   ? "/namespaces/" + s.metadata.namespace
+		   : "")
+		+ "/" + s.kind
+		+ "/" + s.metadata.name`
+
+	ast, issues := env.Compile(expr)
+	require.NoError(t, issues.Err())
+	prg, err := env.Program(ast)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		template map[string]any
+		want     string
+	}{
+		{
+			name: "namespaced resource",
+			template: map[string]any{
+				"apiVersion": "v1",
+				"kind":       "ConfigMap",
+				"metadata":   map[string]any{"name": "contested", "namespace": "default"},
+			},
+			want: "v1/namespaces/default/ConfigMap/contested",
+		},
+		{
+			name: "cluster-scoped resource (namespace absent)",
+			template: map[string]any{
+				"apiVersion": "rbac.authorization.k8s.io/v1",
+				"kind":       "ClusterRoleBinding",
+				"metadata":   map[string]any{"name": "platform-admin"},
+			},
+			want: "rbac.authorization.k8s.io/v1/ClusterRoleBinding/platform-admin",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, _, err := prg.Eval(map[string]any{"s": tt.template})
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, out.Value().(string))
+		})
+	}
+}
