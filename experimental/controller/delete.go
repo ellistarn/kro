@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -273,7 +274,7 @@ func (r *GraphReconciler) compileTeardownDAG(ctx context.Context, graph *unstruc
 // Owner lifecycle
 // ---------------------------------------------------------------------------
 
-func (r *GraphReconciler) ownerDeleting(ctx context.Context, graph *unstructured.Unstructured) bool {
+func (r *GraphReconciler) ownerDeleting(ctx context.Context, graph *unstructured.Unstructured) (bool, error) {
 	reader := r.cluster().reader
 	for _, ref := range graph.GetOwnerReferences() {
 		gv, err := schema.ParseGroupVersion(ref.APIVersion)
@@ -287,11 +288,14 @@ func (r *GraphReconciler) ownerDeleting(ctx context.Context, graph *unstructured
 			Kind:    ref.Kind,
 		})
 		if err := reader.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: graph.GetNamespace()}, owner); err != nil {
-			continue
+			if apierrors.IsNotFound(err) {
+				return true, nil // Owner gone — treat as terminating
+			}
+			return false, fmt.Errorf("checking owner %s/%s: %w", ref.Kind, ref.Name, err)
 		}
 		if !owner.GetDeletionTimestamp().IsZero() {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }

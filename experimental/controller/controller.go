@@ -160,7 +160,11 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	// -----------------------------------------------------------------------
 	// 4. Handle owner lifecycle — self-delete if owner is terminating
 	// -----------------------------------------------------------------------
-	if r.ownerDeleting(ctx, graph) {
+	ownerGone, err := r.ownerDeleting(ctx, graph)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if ownerGone {
 		if err := r.Client.Delete(ctx, graph); err != nil && !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, fmt.Errorf("self-deleting graph for owner teardown: %w", err)
 		}
