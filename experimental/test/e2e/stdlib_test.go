@@ -213,6 +213,89 @@ func TestStdlibKindStatusWriteback(t *testing.T) {
 	t.Log("Kind status writeback works: schema.status CEL → instance .status")
 }
 
+// TestKindBareTypeStatusCausesError reproduces the bug where bare type
+// declarations in Kind schema status fields (e.g., `ready: boolean`) cause
+// the kindInstancePatch to write literal type descriptor strings to the API
+// server. The SSA apply rejects the type mismatch, producing a permanent
+// SystemError on the per-instance Graph.
+//
+// Root cause: kindInstancePatch embeds k.spec.schema.status directly as the
+// patch body. Bare types pass through evaluation unchanged (no ${...} to
+// evaluate) and are written as literal strings to typed fields.
+func TestKindBareTypeStatusCausesError(t *testing.T) {
+	t.Parallel()
+	require.NoError(t, waitForCRD(ctx, k8sClient, "kinds.experimental.kro.run", stdlibCRDTimeout))
+
+	// Create a Kind with bare type declarations in status (the bug trigger).
+	t.Log("creating Kind with bare type status: BrokenWidget")
+	kind := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "experimental.kro.run/v1alpha1",
+		"kind":       "Kind",
+		"metadata": map[string]any{
+			"name":      "brokenwidget",
+			"namespace": "kro-system",
+		},
+		"spec": map[string]any{
+			"schema": map[string]any{
+				"apiVersion": "test.stdlib.kro.run/v1alpha1",
+				"kind":       "BrokenWidget",
+				"spec": map[string]any{
+					"color": "string | default=red",
+				},
+				"status": map[string]any{
+					"ready":   "boolean", // bare type — NOT an expression
+					"message": "string",  // bare type — NOT an expression
+				},
+			},
+			"nodes": []any{
+				map[string]any{
+					"id": "cm",
+					"template": map[string]any{
+						"apiVersion": "v1",
+						"kind":       "ConfigMap",
+						"metadata": map[string]any{
+							"name":      "${schema.metadata.name}-data",
+							"namespace": "${schema.metadata.namespace}",
+						},
+						"data": map[string]any{
+							"color": "${schema.spec.color}",
+						},
+					},
+				},
+			},
+		},
+	}}
+	require.NoError(t, k8sClient.Create(ctx, kind))
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), kind) })
+
+	// Wait for the BrokenWidget CRD to be established.
+	require.NoError(t, waitForCRD(ctx, k8sClient, "brokenwidgets.test.stdlib.kro.run", stdlibCRDTimeout))
+	t.Log("BrokenWidget CRD established")
+
+	// Create a BrokenWidget instance.
+	widget := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "test.stdlib.kro.run/v1alpha1",
+		"kind":       "BrokenWidget",
+		"metadata": map[string]any{
+			"name":      "test-broken",
+			"namespace": "kro-system",
+		},
+		"spec": map[string]any{
+			"color": "blue",
+		},
+	}}
+	require.NoError(t, k8sClient.Create(ctx, widget))
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), widget) })
+
+	// The per-instance Graph should enter SystemError because the
+	// kindInstancePatch tries to write "boolean" (string) to a boolean field.
+	graphKey := types.NamespacedName{Name: "kind.brokenwidget.test-broken", Namespace: "kro-system"}
+	t.Log("waiting for per-instance Graph to report SystemError...")
+	require.NoError(t, waitForGraphReadyReason(ctx, k8sClient, graphKey, "SystemError", stdlibReconcileTimeout),
+		"per-instance Graph should have Ready=False reason=SystemError due to bare type status")
+	t.Log("Confirmed: bare type status declarations cause SystemError on kindInstancePatch")
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Decorator
 //
@@ -388,6 +471,45 @@ func TestStdlibSingleton(t *testing.T) {
 		cmKey, []string{"data", "owner"}, "team-b", stdlibReconcileTimeout),
 		"ConfigMap not created with team-b content within timeout")
 	t.Log("team-b (priority 100) wins over team-a (priority 10)")
+
+	// Phase 3: Verify status writeback on both Singletons. The Kind controller
+	// evaluates the status expressions in kindInstancePatch and writes back
+	// active (boolean) and claim (string) to each instance.
+	//
+	// This is the regression test for the bare-type-status bug: previously
+	// the singleton declared `active: boolean` and `claim: string` as bare
+	// type declarations. The kindInstancePatch wrote the literal strings
+	// "boolean" and "string" as status values, causing SSA rejection:
+	//   .status.active: expected boolean, got &{boolean}
+	// The fix changes these to CEL expressions that compute the values.
+	singletonGVK := schema.GroupVersionKind{
+		Group:   "experimental.kro.run",
+		Version: "v1alpha1",
+		Kind:    "Singleton",
+	}
+	t.Log("waiting for status writeback on Singleton team-b (holder)...")
+	require.NoError(t, waitForField(ctx, k8sClient, singletonGVK,
+		types.NamespacedName{Name: "team-b", Namespace: "kro-system"},
+		[]string{"status", "claim"}, "v1/namespaces/"+ns+"/ConfigMap/contested", stdlibReconcileTimeout),
+		"status.claim not written back to Singleton team-b")
+	t.Log("Singleton status writeback works: team-b has claim")
+
+	// Verify team-b is active (holder), team-a is not.
+	// waitForField only checks strings; for booleans, check inline.
+	bObj := &unstructured.Unstructured{}
+	bObj.SetGroupVersionKind(singletonGVK)
+	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: "team-b", Namespace: "kro-system"}, bObj))
+	active, found, _ := unstructured.NestedBool(bObj.Object, "status", "active")
+	assert.True(t, found, "status.active should be present on team-b")
+	assert.True(t, active, "team-b should be active (it holds the claim)")
+
+	aObj := &unstructured.Unstructured{}
+	aObj.SetGroupVersionKind(singletonGVK)
+	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: "team-a", Namespace: "kro-system"}, aObj))
+	activeA, foundA, _ := unstructured.NestedBool(aObj.Object, "status", "active")
+	assert.True(t, foundA, "status.active should be present on team-a")
+	assert.False(t, activeA, "team-a should NOT be active (lower priority)")
+	t.Log("Singleton status expressions work: active=true on holder, false on loser")
 
 	// TODO: Failover test (delete team-b, verify team-a takes over).
 	// Blocked on forEach prune: when Singleton team-b is deleted, the Kind
