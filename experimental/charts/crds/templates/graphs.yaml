@@ -203,7 +203,6 @@ spec:
           jsonPath: .status.conditions[?(@.type=="Compiled")].status
         - name: Message
           type: string
-          priority: 1
           jsonPath: .status.conditions[?(@.type=="Ready")].message
         - name: Age
           type: date

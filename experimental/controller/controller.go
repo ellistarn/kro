@@ -215,6 +215,7 @@ func (r *GraphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	rstate := &reconcileState{
 		compiled:    rev.compilationErr == nil,
 		compiledErr: rev.compilationErr,
+		nodeCount:   len(rev.dag.Nodes),
 		planSummary: wp.summary,
 		nodeErrors:  append(wp.nodeErrors, pr.errors...),
 		nodeNotes:   pr.notes,

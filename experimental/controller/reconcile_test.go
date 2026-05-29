@@ -911,8 +911,9 @@ func TestDeriveReadyCondition_BlockedBeforePending(t *testing.T) {
 }
 
 // TestDeriveReadyCondition_PendingSurfacesReasons proves that when the
-// Ready condition is Pending, the message includes per-node error details.
-// Pure function test — exercises the formatting branch of deriveReadyCondition.
+// Ready condition is Pending with a nodeError entry for a pending node,
+// the message includes the error detail. Pure function test — exercises
+// the formatting of deriveReadyCondition.
 func TestDeriveReadyCondition_PendingSurfacesReasons(t *testing.T) {
 	s := &reconcileState{
 		compiled:    true,
@@ -920,13 +921,154 @@ func TestDeriveReadyCondition_PendingSurfacesReasons(t *testing.T) {
 		nodeErrors:  []string{"deploy: waiting for input from cfg"},
 	}
 	outcome := s.deriveReadyCondition()
-	assert.Contains(t, outcome.message, "waiting for input from cfg")
+	assert.Contains(t, outcome.message, "1 pending")
+	assert.Contains(t, outcome.message, "deploy (pending): waiting for input from cfg")
 }
 
-// TestCheckDependencyGate_RegressionExcludedPersistence verifies that when
-// a dependency is Excluded, checkDependencyGate returns gateExcluded so
-// the walk can set the child to Excluded. This tests the same invariant
-// as the old tryDispatch persistence test — contagious exclusion.
+// TestDeriveReadyCondition_MessageFormat verifies the exact message structure
+// for various state combinations.
+func TestDeriveReadyCondition_MessageFormat(t *testing.T) {
+	tests := []struct {
+		name        string
+		state       reconcileState
+		wantMessage string
+	}{
+		{
+			name: "all ready",
+			state: reconcileState{
+				compiled:    true,
+				nodeCount:   3,
+				planSummary: PlanSummary{ReadyCount: 3},
+			},
+			wantMessage: "3 ready",
+		},
+		{
+			name: "mixed states without errors",
+			state: reconcileState{
+				compiled: true,
+				planSummary: PlanSummary{
+					ReadyCount:    5,
+					NotReadyNodes: []string{"deploy", "svc"},
+					PendingNodes:  []string{"ingress"},
+				},
+			},
+			wantMessage: "5 ready, 2 not ready, 1 pending",
+		},
+		{
+			name: "error with detail",
+			state: reconcileState{
+				compiled: true,
+				planSummary: PlanSummary{
+					ReadyCount: 2,
+					ErrorNodes: []string{"broken"},
+				},
+				nodeErrors: []string{"broken: 403 Forbidden"},
+			},
+			wantMessage: "2 ready, 1 error\n  broken (error): 403 Forbidden",
+		},
+		{
+			name: "multiple errors sorted alphabetically",
+			state: reconcileState{
+				compiled: true,
+				planSummary: PlanSummary{
+					ReadyCount: 1,
+					ErrorNodes: []string{"zeta", "alpha"},
+				},
+				nodeErrors: []string{"zeta: bad request", "alpha: forbidden"},
+			},
+			wantMessage: "1 ready, 2 error\n  alpha (error): forbidden\n  zeta (error): bad request",
+		},
+		{
+			name: "system error + error sorted by node ID",
+			state: reconcileState{
+				compiled: true,
+				planSummary: PlanSummary{
+					ReadyCount:       3,
+					ErrorNodes:       []string{"auth"},
+					SystemErrorNodes: []string{"db"},
+				},
+				nodeErrors: []string{"auth: 403 Forbidden", "db: 503 Service Unavailable"},
+			},
+			wantMessage: "3 ready, 1 error, 1 system error\n  auth (error): 403 Forbidden\n  db (system error): 503 Service Unavailable",
+		},
+		{
+			name: "excluded nodes counted",
+			state: reconcileState{
+				compiled: true,
+				planSummary: PlanSummary{
+					ReadyCount:    5,
+					ExcludedCount: 3,
+				},
+			},
+			wantMessage: "5 ready, 3 excluded",
+		},
+		{
+			name: "blocked nodes counted",
+			state: reconcileState{
+				compiled: true,
+				planSummary: PlanSummary{
+					ReadyCount:   3,
+					BlockedNodes: []string{"downstream"},
+					ErrorNodes:   []string{"upstream"},
+				},
+				nodeErrors: []string{"upstream: 422 invalid"},
+			},
+			wantMessage: "3 ready, 1 blocked, 1 error\n  upstream (error): 422 invalid",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			outcome := tt.state.deriveReadyCondition()
+			assert.Equal(t, tt.wantMessage, outcome.message)
+		})
+	}
+}
+
+// TestDeriveReadyCondition_Truncation verifies that error detail lines are
+// capped at maxErrorDetails (10) with a "... and N more" suffix.
+func TestDeriveReadyCondition_Truncation(t *testing.T) {
+	// Build a state with 13 error nodes.
+	errorNodes := make([]string, 13)
+	nodeErrors := make([]string, 13)
+	for i := range errorNodes {
+		id := fmt.Sprintf("node%02d", i)
+		errorNodes[i] = id
+		nodeErrors[i] = fmt.Sprintf("%s: error %d", id, i)
+	}
+
+	s := &reconcileState{
+		compiled: true,
+		planSummary: PlanSummary{
+			ReadyCount: 5,
+			ErrorNodes: errorNodes,
+		},
+		nodeErrors: nodeErrors,
+	}
+	outcome := s.deriveReadyCondition()
+
+	lines := strings.Split(outcome.message, "\n")
+	// 1 summary + 10 detail + 1 truncation = 12 lines
+	assert.Equal(t, 12, len(lines),
+		"should have summary + 10 details + truncation line")
+	assert.Equal(t, "5 ready, 13 error", lines[0],
+		"summary should count all errors, not just shown ones")
+	assert.Equal(t, "  ... and 3 more", lines[11],
+		"truncation line should say how many are hidden")
+}
+
+// TestDeriveCompiledCondition_MessageFormat verifies compiled message.
+func TestDeriveCompiledCondition_MessageFormat(t *testing.T) {
+	t.Run("success shows node count", func(t *testing.T) {
+		s := &reconcileState{compiled: true, nodeCount: 47}
+		outcome := s.deriveCompiledCondition()
+		assert.Equal(t, "47 nodes", outcome.message)
+	})
+	t.Run("zero nodes", func(t *testing.T) {
+		s := &reconcileState{compiled: true, nodeCount: 0}
+		outcome := s.deriveCompiledCondition()
+		assert.Equal(t, "0 nodes", outcome.message)
+	})
+}
 func TestCheckDependencyGate_RegressionExcludedPersistence(t *testing.T) {
 	// Build a DAG: root → child. Root will be Excluded in the plan.
 	// checkDependencyGate on child should return gateExcluded.

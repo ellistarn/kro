@@ -49,6 +49,9 @@ type reconcileState struct {
 	compiled    bool
 	compiledErr error // non-nil when compiled=false
 
+	// nodeCount is the total number of nodes in the compiled DAG.
+	nodeCount int
+
 	planSummary PlanSummary
 	// nodeErrors carries detailed error messages ("nodeID: reason") surfaced
 	// alongside the node ID lists in PlanSummary. These provide the reason text
@@ -70,7 +73,7 @@ type reconcileState struct {
 // the spec changes. False means the Graph will never converge until the spec is fixed.
 func (s *reconcileState) deriveCompiledCondition() conditionOutcome {
 	if s.compiled {
-		return conditionOutcome{conditionTrue, "Compiled", "Spec is valid"}
+		return conditionOutcome{conditionTrue, "Compiled", fmt.Sprintf("%d nodes", s.nodeCount)}
 	}
 	if s.compiledErr != nil {
 		// Classify the error
@@ -87,14 +90,18 @@ func (s *reconcileState) deriveCompiledCondition() conditionOutcome {
 
 // deriveReadyCondition computes the Ready condition from the reconcile outcome.
 //
+// The message format is a summary line with state counts followed by up to
+// maxErrorDetails indented per-node error detail lines:
+//
+//	43 ready, 2 pending, 1 error, 1 system error
+//	  authService (error): 403 Forbidden
+//	  paymentDb (system error): 503 Service Unavailable
+//
 // Ready is a rollup of node plan states. Each reason maps to the node state
 // blocking convergence. Precedence: SystemError > Error > Conflict > Blocked >
 // Pending > NotReady. SystemError surfaces first because it signals degraded
 // reconciliation infrastructure — deterministic errors (Error) and conflicts
-// may be artifacts of system instability, not real spec problems. Once the
-// system recovers, the durable errors will still be there. Surfacing Error
-// first would send operators to debug their spec while the real problem is
-// infrastructure.
+// may be artifacts of system instability, not real spec problems.
 //
 //	Ready       → True    — all resources reconciled
 //	Pending     → Unknown — waiting for upstream data
@@ -108,78 +115,169 @@ func (s *reconcileState) deriveReadyCondition() conditionOutcome {
 	if !s.compiled {
 		return conditionOutcome{conditionFalse, "NotCompiled", "Spec is not valid; resources cannot be reconciled"}
 	}
+
+	// Build the summary line: show counts for all non-zero states.
+	msg := s.buildReadyMessage()
+
+	// Determine reason and status from precedence.
 	if len(s.planSummary.SystemErrorNodes) > 0 {
-		msg := fmt.Sprintf("Resources with server/infrastructure errors: %s",
-			sortedJoin(s.planSummary.SystemErrorNodes))
-		if len(s.nodeErrors) > 0 {
-			msg += " (" + strings.Join(s.nodeErrors, "; ") + ")"
-		}
 		return conditionOutcome{conditionFalse, "SystemError", msg}
 	}
 	if len(s.planSummary.ErrorNodes) > 0 {
-		msg := fmt.Sprintf("Resources with errors: %s",
-			sortedJoin(s.planSummary.ErrorNodes))
-		if len(s.nodeErrors) > 0 {
-			msg += " (" + strings.Join(s.nodeErrors, "; ") + ")"
-		}
 		return conditionOutcome{conditionFalse, "Error", msg}
 	}
 	if len(s.planSummary.ConflictNodes) > 0 {
-		msg := fmt.Sprintf("Resources with SSA field ownership conflicts: %s",
-			sortedJoin(s.planSummary.ConflictNodes))
-		if len(s.nodeErrors) > 0 {
-			msg += " (" + strings.Join(s.nodeErrors, "; ") + ")"
-		}
 		return conditionOutcome{conditionFalse, "Conflict", msg}
 	}
 	if len(s.planSummary.BlockedNodes) > 0 {
-		msg := fmt.Sprintf("Resources blocked by upstream errors: %s",
-			sortedJoin(s.planSummary.BlockedNodes))
-		if len(s.nodeErrors) > 0 {
-			msg += " (" + strings.Join(s.nodeErrors, "; ") + ")"
-		}
 		return conditionOutcome{conditionUnknown, "Blocked", msg}
 	}
 	if len(s.planSummary.PendingNodes) > 0 {
-		msg := fmt.Sprintf("Resources waiting for upstream data: %s",
-			sortedJoin(s.planSummary.PendingNodes))
-		if len(s.nodeErrors) > 0 {
-			msg += " (" + strings.Join(s.nodeErrors, "; ") + ")"
-		}
 		return conditionOutcome{conditionUnknown, "Pending", msg}
 	}
 	if len(s.planSummary.NotReadyNodes) > 0 {
-		msg := fmt.Sprintf("Resources not ready: %s",
-			sortedJoin(s.planSummary.NotReadyNodes))
-		if len(s.nodeErrors) > 0 {
-			msg += " (" + strings.Join(s.nodeErrors, "; ") + ")"
-		}
 		return conditionOutcome{conditionUnknown, "NotReady", msg}
-	}
-	msg := fmt.Sprintf("All %d resources reconciled", s.planSummary.ReadyCount)
-	// Surface informational notes (e.g., FinalizerSkipped) that don't
-	// constitute errors but are operationally useful. Per 005-reconciliation.md
-	// § Finalization: "The Graph's status surfaces this: FinalizerSkipped
-	// with a message naming the resource."
-	//
-	// Notes are kept separate from errors (reconcileState.nodeErrors) so that
-	// a healthy graph with an informational note doesn't have its message
-	// parenthesized with error text — the parens are reserved for actionable
-	// problems. Callers route errors to nodeErrors and info to nodeNotes.
-	if len(s.nodeNotes) > 0 {
-		msg += " (" + strings.Join(s.nodeNotes, "; ") + ")"
 	}
 	return conditionOutcome{conditionTrue, "Ready", msg}
 }
 
-// sortedJoin returns a deterministic comma-separated list of node IDs.
-// Sorting happens at consumption time (not in Summary()) because the prune
-// phase may append entries after Summary() returns.
-func sortedJoin(nodes []string) string {
-	sorted := make([]string, len(nodes))
-	copy(sorted, nodes)
-	sort.Strings(sorted)
-	return strings.Join(sorted, ", ")
+// maxErrorDetails is the maximum number of per-node error detail lines
+// included in the Ready condition message. Beyond this, a truncation
+// note ("... and N more") is appended.
+const maxErrorDetails = 10
+
+// buildReadyMessage constructs the Ready condition message: a summary line
+// with state counts, followed by indented per-node error detail lines.
+func (s *reconcileState) buildReadyMessage() string {
+	ps := &s.planSummary
+
+	// Summary line: counts for all non-zero states.
+	var parts []string
+	if ps.ReadyCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d ready", ps.ReadyCount))
+	}
+	if len(ps.NotReadyNodes) > 0 {
+		parts = append(parts, fmt.Sprintf("%d not ready", len(ps.NotReadyNodes)))
+	}
+	if len(ps.PendingNodes) > 0 {
+		parts = append(parts, fmt.Sprintf("%d pending", len(ps.PendingNodes)))
+	}
+	if ps.ExcludedCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d excluded", ps.ExcludedCount))
+	}
+	if len(ps.BlockedNodes) > 0 {
+		parts = append(parts, fmt.Sprintf("%d blocked", len(ps.BlockedNodes)))
+	}
+	if len(ps.ConflictNodes) > 0 {
+		parts = append(parts, fmt.Sprintf("%d conflict", len(ps.ConflictNodes)))
+	}
+	if len(ps.ErrorNodes) > 0 {
+		parts = append(parts, fmt.Sprintf("%d error", len(ps.ErrorNodes)))
+	}
+	if len(ps.SystemErrorNodes) > 0 {
+		parts = append(parts, fmt.Sprintf("%d system error", len(ps.SystemErrorNodes)))
+	}
+
+	// If all states are zero (shouldn't happen), produce a fallback.
+	if len(parts) == 0 {
+		parts = append(parts, "0 ready")
+	}
+	summary := strings.Join(parts, ", ")
+
+	// Append node notes when the graph is fully healthy.
+	if ps.IsClean() && len(s.nodeNotes) > 0 {
+		sorted := make([]string, len(s.nodeNotes))
+		copy(sorted, s.nodeNotes)
+		sort.Strings(sorted)
+		summary += " (" + strings.Join(sorted, "; ") + ")"
+	}
+
+	// Build per-node error detail lines. Each nodeError is "nodeID: reason".
+	// Look up the node's state from PlanSummary to label the detail line.
+	if len(s.nodeErrors) == 0 {
+		return summary
+	}
+
+	stateIndex := buildStateIndex(ps)
+	details := formatNodeErrors(s.nodeErrors, stateIndex)
+	if len(details) == 0 {
+		return summary
+	}
+
+	// Truncate to maxErrorDetails.
+	var b strings.Builder
+	b.WriteString(summary)
+	shown := details
+	overflow := 0
+	if len(details) > maxErrorDetails {
+		shown = details[:maxErrorDetails]
+		overflow = len(details) - maxErrorDetails
+	}
+	for _, d := range shown {
+		b.WriteString("\n  ")
+		b.WriteString(d)
+	}
+	if overflow > 0 {
+		b.WriteString(fmt.Sprintf("\n  ... and %d more", overflow))
+	}
+	return b.String()
+}
+
+// buildStateIndex creates a map from node ID to its human-readable state label.
+func buildStateIndex(ps *PlanSummary) map[string]string {
+	idx := make(map[string]string)
+	for _, id := range ps.SystemErrorNodes {
+		idx[id] = "system error"
+	}
+	for _, id := range ps.ErrorNodes {
+		idx[id] = "error"
+	}
+	for _, id := range ps.ConflictNodes {
+		idx[id] = "conflict"
+	}
+	for _, id := range ps.BlockedNodes {
+		idx[id] = "blocked"
+	}
+	for _, id := range ps.NotReadyNodes {
+		idx[id] = "not ready"
+	}
+	for _, id := range ps.PendingNodes {
+		idx[id] = "pending"
+	}
+	return idx
+}
+
+// formatNodeErrors formats nodeError strings ("nodeID: reason") into
+// detail lines ("nodeID (state): reason"), sorted for determinism.
+func formatNodeErrors(nodeErrors []string, stateIndex map[string]string) []string {
+	type entry struct {
+		nodeID string
+		state  string
+		reason string
+	}
+	var entries []entry
+	for _, e := range nodeErrors {
+		i := strings.Index(e, ": ")
+		if i <= 0 {
+			continue
+		}
+		nodeID := e[:i]
+		reason := e[i+2:]
+		state := stateIndex[nodeID]
+		if state == "" {
+			state = "error" // fallback
+		}
+		entries = append(entries, entry{nodeID, state, reason})
+	}
+	// Sort by node ID for determinism.
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].nodeID < entries[j].nodeID
+	})
+	details := make([]string, 0, len(entries))
+	for _, e := range entries {
+		details = append(details, fmt.Sprintf("%s (%s): %s", e.nodeID, e.state, e.reason))
+	}
+	return details
 }
 
 // updateStatus writes the Graph's status subresource. Reads the latest version
