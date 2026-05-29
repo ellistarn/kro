@@ -19,11 +19,10 @@ import (
 
 // TestMessageNamesNodeID_NotReady proves that when a node's readyWhen
 // evaluates to false (the normal "waiting for convergence" case), the
-// Ready condition message names the specific node ID.
+// Ready condition message shows the not-ready count.
 //
-// This is distinct from TestStatusNotReadySurfacesReadyWhenError which
-// tests the broken-expression path. Here the expression is valid — it
-// simply returns false.
+// NotReady is a converging state (Ready=Unknown) — the message shows
+// state counts but not per-node names, since these will self-resolve.
 func TestMessageNamesNodeID_NotReady(t *testing.T) {
 	t.Parallel()
 	ns := createNamespace(t)
@@ -72,20 +71,23 @@ func TestMessageNamesNodeID_NotReady(t *testing.T) {
 	graphKey := types.NamespacedName{Name: "msg-notready", Namespace: ns}
 	require.NoError(t, waitForGraphReadyReason(ctx, k8sClient, graphKey, "NotReady"))
 
-	// Fetch and assert the message names the node.
+	// Fetch and assert the message shows state counts.
 	g := &unstructured.Unstructured{}
 	g.SetGroupVersionKind(GraphGVK)
 	require.NoError(t, k8sClient.Get(ctx, graphKey, g))
 
 	msg := graphReadyMessage(g)
 	t.Logf("NotReady message: %s", msg)
-	assert.Contains(t, msg, "backend",
-		"Ready condition message must name the not-ready node ID")
+	assert.Contains(t, msg, "not ready",
+		"Ready condition message must show not-ready count")
 }
 
 // TestMessageNamesNodeID_Pending proves that when a node is gated by an
-// unsatisfied propagateWhen, the Ready condition message names the pending
-// node ID.
+// unsatisfied propagateWhen, the Ready condition message shows the pending
+// count.
+//
+// Pending is a converging state (Ready=Unknown) — the message shows
+// state counts but not per-node names, since these will self-resolve.
 func TestMessageNamesNodeID_Pending(t *testing.T) {
 	t.Parallel()
 	ns := createNamespace(t)
@@ -137,8 +139,8 @@ func TestMessageNamesNodeID_Pending(t *testing.T) {
 
 	msg := graphReadyMessage(g)
 	t.Logf("Pending message: %s", msg)
-	assert.Contains(t, msg, "gated",
-		"Ready condition message must name the pending node ID")
+	assert.Contains(t, msg, "pending",
+		"Ready condition message must show pending count")
 }
 
 // TestMessageNamesNodeID_Error proves that when a node hits a deterministic

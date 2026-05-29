@@ -642,73 +642,53 @@ its own scope.
 
 ## Status
 
-The Graph's status exposes the Graph's current state. Status conditions exist to make the
-operator's mental model correct — they answer "is this Graph healthy, and if not, who needs to act?"
-
-Two failure domains require different responses: a user error is a Graph developer problem (fix the
-spec, resolve conflicts, correct permissions); a system error is an operator problem (infrastructure
-or server failures). The condition structure reflects this split.
-
 ### Conditions
 
-`status.conditions` follows the standard Kubernetes condition convention — each condition has
-`type`, `status`, `reason`, `message`, `lastTransitionTime`, and `observedGeneration`.
-`lastTransitionTime` is preserved when the status value does not change between reconciles.
-`observedGeneration` is the `metadata.generation` the condition was last evaluated against — each
-condition advances independently.
+Two conditions on orthogonal axes. Standard Kubernetes condition fields; `lastTransitionTime`
+preserved when status unchanged; `observedGeneration` advances independently per condition.
 
-The Graph defines two conditions on orthogonal axes:
+**`Compiled`** — is the spec valid? Set once when the spec is processed, permanent until the spec
+changes. Message: `"<N> nodes"` on success; verbatim compiler error on failure.
 
-**`Compiled`** — the spec is valid. CEL expressions compiled, the dependency graph is acyclic, and
-node declarations are structurally correct. Set once when the spec is processed. Permanent until the
-spec changes. A `False` Compiled condition means the Graph will never converge until the developer
-fixes the spec.
+| Reason             | Meaning                    |
+| ------------------ | -------------------------- |
+| `Compiled`         | Spec is valid              |
+| `ExpressionError`  | CEL expression is invalid  |
+| `DependencyError`  | Circular dependency        |
+| `DeclarationError` | Malformed node declaration |
 
-| Reason             | Meaning                          |
-| ------------------ | -------------------------------- |
-| `Compiled`         | Spec is valid                    |
-| `ExpressionError`  | CEL expression is invalid        |
-| `DependencyError`  | Nodes form a circular dependency |
-| `DeclarationError` | Node declaration is malformed    |
+**`Ready`** — has the graph converged? `True` means all nodes satisfied. `Unknown` means the
+controller is still making progress. `False` means something requires human intervention. Authors
+control what gates this condition by choosing which nodes carry `readyWhen` (see § readyWhen >
+Graph Readiness).
 
-**`Ready`** — a rollup of node readyWhen evaluations. Each reason maps to the node state blocking
-convergence. `True` means all nodes with readyWhen are satisfied and all resources are reconciled.
-`Unknown` means converging — the controller is making progress and no intervention is needed.
-`False` means stuck — something requires operator action. Authors control what blocks this condition
-by choosing which nodes carry readyWhen (see § readyWhen > Graph Readiness).
+The message is a summary line of non-zero state counts followed by up to 10 indented detail lines
+for error-state nodes in the format `<nodeID> (<state>): <reason>`, sorted by node ID. Converging
+states show counts only. Messages are deterministic for the same underlying state, avoiding spurious
+status writes.
 
-Alarm on Ready `False` or `Unknown` persisting beyond a reasonable convergence window. Since
-Compiled rolls up into Ready (as `NotCompiled`), a single alarm on the Ready condition covers both
-developer and operator failure modes.
-
-| Reason        | Status    | Node State  | Meaning                                        |
-| ------------- | --------- | ----------- | ---------------------------------------------- |
-| `Ready`       | `True`    | Ready       | All resources reconciled                       |
-| `NotReady`    | `Unknown` | NotReady    | Applied but readyWhen conditions not met       |
-| `Pending`     | `Unknown` | Pending     | Waiting for upstream data                      |
-| `Blocked`     | `Unknown` | Blocked     | Dependency in error state, waiting for resolve |
-| `NotCompiled` | `False`   | —           | Spec invalid; rollup of Compiled=False         |
-| `Conflict`    | `False`   | Conflict    | SSA field ownership contested by another actor |
-| `Error`       | `False`   | Error       | Client request failed (4xx)                    |
-| `SystemError` | `False`   | SystemError | Server or infrastructure failure (5xx)         |
+| Reason        | Status    | Meaning                                |
+| ------------- | --------- | -------------------------------------- |
+| `Ready`       | `True`    | All resources applied and ready         |
+| `NotReady`    | `Unknown` | readyWhen not met                      |
+| `Pending`     | `Unknown` | Waiting for upstream data              |
+| `Blocked`     | `Unknown` | Dependency in error state              |
+| `NotCompiled` | `False`   | Rollup of Compiled=False               |
+| `Conflict`    | `False`   | SSA field ownership contested          |
+| `Error`       | `False`   | Client request failed (4xx)            |
+| `SystemError` | `False`   | Server or infrastructure failure (5xx) |
 
 ```yaml
-status:
-  conditions:
-    - type: Compiled
-      status: "True"
-      reason: Compiled
-      observedGeneration: 1
-      lastTransitionTime: "2025-01-15T10:29:00Z"
-    - type: Ready
-      status: "True"
-      reason: Ready
-      message: "All 3 resources reconciled"
-      observedGeneration: 1
-      lastTransitionTime: "2025-01-15T10:30:00Z"
-  topologicalOrder:
-    nodes: ["schema", "deployment", "service", "statusPatch"]
+message: "47 ready"
+message: "43 ready, 4 pending"
+message: |-
+  1 ready, 1 error, 1 system error
+    authService (error): Forbidden
+    paymentDb (system error): ServerError
 ```
+
+Alarm on `False` or `Unknown` persisting beyond a reasonable convergence window. Compiled rolls into
+Ready as `NotCompiled`, so a single Ready alarm covers both failure domains.
 
 ### Topological Order
 

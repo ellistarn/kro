@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/cel-go/common/types"
@@ -226,6 +227,18 @@ type nodeIntegrationResult struct {
 	requeueHint    time.Duration // time comparison solving hint (0 = none)
 }
 
+// stripNodePrefix removes the redundant "<nodeType> <nodeID>: " prefix from
+// error reason strings. Node handlers wrap errors with this prefix for log
+// context, but the status message already shows the node ID — displaying it
+// twice is noise.
+func stripNodePrefix(reason string, node *graphpkg.Node) string {
+	prefix := fmt.Sprintf("%s %s: ", node.Type(), node.ID)
+	if strings.HasPrefix(reason, prefix) {
+		return reason[len(prefix):]
+	}
+	return reason
+}
+
 // integrateNodeResult processes a single node's evaluation output and
 // updates the propagation's shared state: plan states, scope, keys, forEach,
 // and dynamic GVK resolution. Handles error states (Error, Conflict,
@@ -252,8 +265,9 @@ func integrateNodeResult(
 	if nr.state == NodeError {
 		info := classifyAPIError(nr.err)
 		plan.SetState(node.ID, info.state)
-		out.errMsgs = append(out.errMsgs, fmt.Sprintf("%s: %s", node.ID, info.reason))
-		logger.V(0).Info("error on node", "node", node.ID, "state", info.state, "reason", info.reason, "error", nr.err)
+		reason := stripNodePrefix(info.reason, node)
+		out.errMsgs = append(out.errMsgs, fmt.Sprintf("%s: %s", node.ID, reason))
+		logger.V(0).Info("error on node", "node", node.ID, "state", info.state, "reason", reason, "error", nr.err)
 		return out
 	}
 	if nr.state == NodeConflict {

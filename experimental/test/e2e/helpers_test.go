@@ -502,6 +502,9 @@ func graphReadyStatus(g *unstructured.Unstructured) string { return conditionFie
 // graphCompiledReason returns the reason from the Compiled condition.
 func graphCompiledReason(g *unstructured.Unstructured) string { return conditionField(g, "Compiled", "reason") }
 
+// graphCompiledMessage returns the Compiled condition's message string, or "" if not found.
+func graphCompiledMessage(g *unstructured.Unstructured) string { return conditionField(g, "Compiled", "message") }
+
 // waitForGraphReady polls until the Graph's Ready condition is True.
 func waitForGraphReady(ctx context.Context, c client.Client, key types.NamespacedName, timeout ...time.Duration) error {
 	t := 30 * time.Second

@@ -1193,9 +1193,9 @@ func TestReadyRollupPrecedence_SystemErrorOverError(t *testing.T) {
 	assert.Equal(t, "False", graphReadyStatus(g),
 		"Ready status should be False for SystemError")
 
-	// Verify the message mentions server/infrastructure errors (not CEL errors).
+	// Verify the message mentions system errors (not CEL errors).
 	msg := graphReadyMessage(g)
-	assert.Contains(t, msg, "server/infrastructure",
-		"Ready message should reference server/infrastructure errors")
+	assert.Contains(t, msg, "system error",
+		"Ready message should reference system error state")
 	t.Log("Precedence proved: SystemError > Error in Ready condition rollup")
 }

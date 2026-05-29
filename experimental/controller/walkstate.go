@@ -106,6 +106,7 @@ type PlanSummary struct {
 	ErrorNodes       []string
 	SystemErrorNodes []string
 	ReadyCount       int
+	ExcludedCount    int
 }
 
 // HasUncertainty reports whether any node state creates uncertainty about
@@ -136,9 +137,7 @@ func (ps *PlanState) Summary() PlanSummary {
 		case NodeBlocked:
 			s.BlockedNodes = append(s.BlockedNodes, id)
 		case NodeExcluded:
-			// Counted but not surfaced — excluded nodes propagate through
-			// the DAG via contagious exclusion and are observable in
-			// per-node status, not the aggregate summary.
+			s.ExcludedCount++
 		case NodeError:
 			s.ErrorNodes = append(s.ErrorNodes, id)
 		case NodeSystemError:
