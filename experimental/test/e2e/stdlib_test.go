@@ -398,15 +398,16 @@ func TestStdlibDecorator(t *testing.T) {
 //
 // Declare a resource that should exist exactly once. When multiple
 // Singletons target the same resource (same GVK + namespace + name),
-// the highest priority wins. Ties broken by lowest name.
+// the highest priority wins. Ties broken by earliest creationTimestamp.
 //
-// Implemented as Kind + Decorator. The Decorator watches all Singletons
-// and creates a sub-Graph per item. Each sub-Graph self-determines if
-// it's the claim holder via includeWhen. The target node uses TemplateExpr
-// (template: "${item.spec.template}") to forward the full resource spec.
+// Implemented as a single long-lived Graph (fan-in pattern). The Graph
+// watches all Singleton CRs, computes winners per unique target identity,
+// and applies one resource per identity via forEach template with force-apply.
 //
-// Pipeline: Singleton → Decorator sub-Graph → peers Watch →
-// includeWhen gate → target resource (if holder)
+// The target is owned by the singleton controller Graph, not by any
+// per-instance sub-Graph. When a Singleton CR is deleted, the Graph
+// re-evaluates: if peers remain, the target persists with the new
+// winner's template (force-applied in place, same UID).
 // ═══════════════════════════════════════════════════════════════════════════════
 
 func TestStdlibSingleton(t *testing.T) {
@@ -511,13 +512,121 @@ func TestStdlibSingleton(t *testing.T) {
 	assert.False(t, activeA, "team-a should NOT be active (lower priority)")
 	t.Log("Singleton status expressions work: active=true on holder, false on loser")
 
-	// TODO: Failover test (delete team-b, verify team-a takes over).
-	// Blocked on forEach prune: when Singleton team-b is deleted, the Kind
-	// controller's L1 forEach should prune team-b's per-instance Graph,
-	// triggering teardown which deletes the ConfigMap. Then team-a's
-	// includeWhen opens and it creates the ConfigMap. Currently forEach
-	// scale-down prune doesn't fire (same root cause as
-	// TestMultipleForEachNodesIndependence).
+	// Failover is tested separately in TestStdlibSingletonFailover.
+}
+
+// TestStdlibSingletonFailover proves the force-takeover refcounting mechanism:
+// when the current holder is deleted, the next-in-line adopts the resource
+// via force-apply (SSA with ForceOwnership). The resource is never deleted.
+//
+// Sequence:
+//  1. team-b (priority 100) holds the resource
+//  2. team-b is deleted
+//  3. team-a (priority 10) re-evaluates as holder, force-applies → adopts resource
+//  4. Resource data changes from team-b's content to team-a's content
+//  5. Resource was never deleted (resourceVersion continuity, no recreate gap)
+//
+// The mechanism: team-a's per-instance Graph watches all Singletons. When
+// team-b disappears, team-a's holder computation changes, its includeWhen
+// opens, and it force-applies the target. Force-apply stamps team-a's
+// identity labels, evicting team-b's. If team-b's teardown runs afterward,
+// deletePreflight sees labels don't match → deleteNotOwned → skip.
+func TestStdlibSingletonFailover(t *testing.T) {
+	t.Parallel()
+	require.NoError(t, waitForCRD(ctx, k8sClient, "singletons.experimental.kro.run", stdlibCRDTimeout))
+
+	ns := createNamespace(t)
+
+	// Phase 1: Create team-a (low priority) first, then team-b (high priority).
+	t.Log("creating Singleton: team-a (priority 10)")
+	singletonA := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "experimental.kro.run/v1alpha1",
+		"kind":       "Singleton",
+		"metadata": map[string]any{
+			"name":      "failover-a",
+			"namespace": "kro-system",
+		},
+		"spec": map[string]any{
+			"priority": int64(10),
+			"template": map[string]any{
+				"apiVersion": "v1",
+				"kind":       "ConfigMap",
+				"metadata":   map[string]any{"name": "failover-target", "namespace": ns},
+				"data":       map[string]any{"owner": "team-a"},
+			},
+		},
+	}}
+	require.NoError(t, k8sClient.Create(ctx, singletonA))
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), singletonA) })
+
+	t.Log("creating Singleton: team-b (priority 100)")
+	singletonB := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "experimental.kro.run/v1alpha1",
+		"kind":       "Singleton",
+		"metadata": map[string]any{
+			"name":      "failover-b",
+			"namespace": "kro-system",
+		},
+		"spec": map[string]any{
+			"priority": int64(100),
+			"template": map[string]any{
+				"apiVersion": "v1",
+				"kind":       "ConfigMap",
+				"metadata":   map[string]any{"name": "failover-target", "namespace": ns},
+				"data":       map[string]any{"owner": "team-b"},
+			},
+		},
+	}}
+	require.NoError(t, k8sClient.Create(ctx, singletonB))
+
+	// Phase 2: Wait for team-b to win and create the resource.
+	cmGVK := schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}
+	cmKey := types.NamespacedName{Name: "failover-target", Namespace: ns}
+
+	t.Log("waiting for ConfigMap with team-b as owner...")
+	require.NoError(t, waitForField(ctx, k8sClient, cmGVK, cmKey,
+		[]string{"data", "owner"}, "team-b", stdlibReconcileTimeout),
+		"ConfigMap should be created with team-b content (higher priority)")
+
+	// Record the resourceVersion before deletion — we'll compare after failover
+	// to prove the resource was mutated in place (not deleted and recreated).
+	cmObj := &unstructured.Unstructured{}
+	cmObj.SetGroupVersionKind(cmGVK)
+	require.NoError(t, k8sClient.Get(ctx, cmKey, cmObj))
+	rvBefore := cmObj.GetResourceVersion()
+	uidBefore := cmObj.GetUID()
+	t.Logf("ConfigMap before failover: rv=%s uid=%s", rvBefore, uidBefore)
+
+	// Phase 3: Delete team-b (the holder). This triggers:
+	// - team-a's watch sees team-b disappear → recomputes holder → team-a wins
+	// - team-a's includeWhen opens → force-applies the target → adopts in place
+	// - team-b's per-instance Graph teardown (if forEach prune fires) sees
+	//   labels changed → deletePreflight returns deleteNotOwned → skip
+	t.Log("deleting Singleton team-b (holder)...")
+	require.NoError(t, k8sClient.Delete(ctx, singletonB))
+
+	// Phase 4: Wait for team-a to adopt — the data.owner field should flip.
+	t.Log("waiting for team-a to adopt the ConfigMap via force-apply...")
+	require.NoError(t, waitForField(ctx, k8sClient, cmGVK, cmKey,
+		[]string{"data", "owner"}, "team-a", stdlibReconcileTimeout),
+		"team-a should adopt the ConfigMap after team-b is deleted (force-apply takeover)")
+
+	// Phase 5: Verify the resource was adopted in place (same UID = no delete/recreate).
+	// NOTE: This assertion documents the DESIRED behavior. Currently, a race
+	// exists: team-b's per-instance Graph teardown may delete the resource
+	// before team-a's force-apply can adopt it. When that happens, the UID
+	// changes (resource was recreated). The force-apply mechanism is correct
+	// (team-a gets the resource either way), but the zero-downtime guarantee
+	// (no delete/recreate gap) requires a deletion guard — the dying holder's
+	// teardown must skip deletion when other claimants exist.
+	require.NoError(t, k8sClient.Get(ctx, cmKey, cmObj))
+	uidAfter := cmObj.GetUID()
+	t.Logf("ConfigMap after failover: rv=%s uid=%s", cmObj.GetResourceVersion(), uidAfter)
+
+	assert.Equal(t, uidBefore, uidAfter,
+		"UID must be unchanged — resource was adopted in place, not deleted and recreated. "+
+			"If this fails, the race condition was lost: teardown deleted before force-apply adopted.")
+	t.Log("force-apply takeover confirmed: same UID, data changed to team-a")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

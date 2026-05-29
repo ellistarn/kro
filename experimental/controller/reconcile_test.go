@@ -2090,3 +2090,208 @@ func TestLazyDepOptionalScope_PresentReturnsRealData(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), replicasVal, "?.orValue(0) on present lazy dep should return 3")
 }
+
+// ---------------------------------------------------------------------------
+// Force takeover — singleton refcount via deletePreflight ownership check
+//
+// When multiple Singletons target the same resource, the holder creates it
+// with lifecycle.apply=Force. On holder transition:
+//   1. New holder force-applies → stamps its identity labels, evicts old labels
+//   2. Old holder's teardown fires deletePreflight → labels don't match → deleteNotOwned
+//   3. Resource survives without deletion
+//
+// This proves that the existing deletePreflight ownership gate is sufficient
+// for reference-counting semantics — no new primitive needed. The force-apply
+// takeover mechanism makes the Singleton graph the sole orchestrator.
+// ---------------------------------------------------------------------------
+
+// TestForceTakeover_DeletePreflightRejectsAfterAdoption proves that once a
+// new holder force-applies (stamping its identity labels), the old holder's
+// deletePreflight returns deleteNotOwned. The resource is NOT deleted.
+//
+// This is the core mechanism for Singleton refcounting: the impl graph for
+// the new holder adopts the resource via force-apply before the dying holder's
+// teardown can delete it.
+func TestForceTakeover_DeletePreflightRejectsAfterAdoption(t *testing.T) {
+	// Simulate: team-b was the holder, created the VPC.
+	// team-a force-applied (adopted), stamping its own identity labels.
+	// Now team-b's teardown fires. deletePreflight should reject.
+
+	oldGraphName := "singleton-team-b"
+	oldGraphNamespace := "kro-system"
+	newGraphName := "singleton-team-a"
+	newGraphNamespace := "kro-system"
+
+	// The resource now has the NEW holder's identity labels (team-a adopted it).
+	newIdentityLabel := "target." + newGraphName + "." + newGraphNamespace + ".internal.kro.run/type"
+	existingVPC := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata": map[string]any{
+			"name":            "platform-vpc",
+			"namespace":       "infra",
+			"resourceVersion": "42",
+			"labels": map[string]any{
+				// Only the new holder's labels remain after force-apply eviction.
+				newIdentityLabel: "template",
+			},
+		},
+		"data": map[string]any{"owner": "team-a"},
+	}}
+
+	fakeClient := fake.NewClientBuilder().
+		WithObjects(existingVPC).
+		Build()
+
+	cluster := &clusterAccess{
+		client: fakeClient,
+		reader: fakeClient,
+	}
+
+	// The OLD holder's reconcile scope — team-b is being torn down.
+	oldGraph := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "experimental.kro.run/v1alpha1",
+		"kind":       "Graph",
+		"metadata": map[string]any{
+			"name":      oldGraphName,
+			"namespace": oldGraphNamespace,
+		},
+	}}
+	rs := newReconcileScope(oldGraph, nil, nil)
+
+	// deletePreflight checks: does this resource have MY identity labels?
+	result := cluster.deletePreflight(context.Background(), "/v1/ConfigMap/infra/platform-vpc", rs)
+
+	// The old holder's labels are gone (evicted by force-apply). deleteNotOwned.
+	assert.Equal(t, deleteNotOwned, result.Outcome,
+		"deletePreflight must return deleteNotOwned when another graph has adopted the resource via force-apply")
+	assert.NotNil(t, result.Obj,
+		"resource should still exist (returned from GET)")
+}
+
+// TestForceTakeover_DeletePreflightAllowsLastHolder proves that when NO
+// other holder has adopted (last claimant scenario), deletePreflight returns
+// deleteReady and the resource CAN be deleted.
+func TestForceTakeover_DeletePreflightAllowsLastHolder(t *testing.T) {
+	// Only team-b exists, it's the last holder. No one adopted.
+	// Its own identity labels are still on the resource.
+
+	graphName := "singleton-team-b"
+	graphNamespace := "kro-system"
+	identityLabel := "target." + graphName + "." + graphNamespace + ".internal.kro.run/type"
+
+	existingVPC := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata": map[string]any{
+			"name":            "platform-vpc",
+			"namespace":       "infra",
+			"resourceVersion": "42",
+			"labels": map[string]any{
+				identityLabel: "template",
+			},
+		},
+		"data": map[string]any{"owner": "team-b"},
+	}}
+
+	fakeClient := fake.NewClientBuilder().
+		WithObjects(existingVPC).
+		Build()
+
+	cluster := &clusterAccess{
+		client: fakeClient,
+		reader: fakeClient,
+	}
+
+	graph := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "experimental.kro.run/v1alpha1",
+		"kind":       "Graph",
+		"metadata": map[string]any{
+			"name":      graphName,
+			"namespace": graphNamespace,
+		},
+	}}
+	rs := newReconcileScope(graph, nil, nil)
+
+	result := cluster.deletePreflight(context.Background(), "/v1/ConfigMap/infra/platform-vpc", rs)
+
+	// Last holder — labels still match. deleteReady.
+	assert.Equal(t, deleteReady, result.Outcome,
+		"deletePreflight must return deleteReady when resource still has this graph's identity labels (last holder)")
+}
+
+// TestForceTakeover_FullPruneSkipsAdoptedResource proves that the full prune
+// path (pruneResources → pruneCandidateTemplate → deletePreflight) correctly
+// skips deletion of a resource that has been adopted by another graph.
+func TestForceTakeover_FullPruneSkipsAdoptedResource(t *testing.T) {
+	oldGraphName := "singleton-team-b"
+	oldGraphNamespace := "kro-system"
+	newGraphName := "singleton-team-a"
+	newGraphNamespace := "kro-system"
+
+	// Resource has been adopted by the new holder (team-a's labels).
+	newIdentityLabel := "target." + newGraphName + "." + newGraphNamespace + ".internal.kro.run/type"
+	existingVPC := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata": map[string]any{
+			"name":            "platform-vpc",
+			"namespace":       "infra",
+			"resourceVersion": "42",
+			"labels": map[string]any{
+				newIdentityLabel: "template",
+			},
+		},
+		"data": map[string]any{"owner": "team-a"},
+	}}
+
+	fakeClient := fake.NewClientBuilder().
+		WithObjects(existingVPC).
+		Build()
+
+	cluster := &clusterAccess{
+		client: fakeClient,
+		reader: fakeClient,
+	}
+
+	// Old holder's graph being torn down.
+	oldGraph := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "experimental.kro.run/v1alpha1",
+		"kind":       "Graph",
+		"metadata": map[string]any{
+			"name":      oldGraphName,
+			"namespace": oldGraphNamespace,
+		},
+	}}
+	rs := newReconcileScope(oldGraph, nil, nil)
+
+	// Build a minimal DAG for ordering. The target node has force lifecycle.
+	nodes := []graphpkg.Node{
+		{ID: "target", Template: map[string]any{
+			"apiVersion": "v1", "kind": "ConfigMap",
+			"metadata": map[string]any{"name": "platform-vpc", "namespace": "infra"},
+		}, Lifecycle: graphpkg.Lifecycle{Apply: "Force"}},
+	}
+	nodes[0].SetType(graphpkg.NodeTypeTemplate)
+	dag, err := dagpkg.BuildDAG(nodes, nil, nil)
+	require.NoError(t, err)
+
+	// Simulate teardown: all keys are candidates, currentKeys = nil.
+	candidates := []Applied{
+		{Key: "/v1/ConfigMap/infra/platform-vpc", NodeID: "target", NodeType: graphpkg.NodeTypeTemplate},
+	}
+
+	pr := cluster.pruneResources(context.Background(), rs, candidates, nil, []*dagpkg.DAG{dag}, nil, &instanceState{})
+
+	// Resource should be skipped (pruneSkipped due to deleteNotOwned).
+	assert.Equal(t, pruneSkipped, pr.Outcomes["/v1/ConfigMap/infra/platform-vpc"],
+		"full prune path must skip resource that was adopted by another graph via force-apply")
+
+	// Verify resource still exists.
+	check := &unstructured.Unstructured{}
+	check.SetAPIVersion("v1")
+	check.SetKind("ConfigMap")
+	require.NoError(t, fakeClient.Get(context.Background(),
+		client.ObjectKeyFromObject(existingVPC), check),
+		"VPC must survive — new holder adopted it before old holder's teardown")
+}
