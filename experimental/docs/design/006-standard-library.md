@@ -162,9 +162,27 @@ template is a Graph.
 ### Priority Resolution
 
 A Singleton wins when no other Singleton targeting the same resource has higher priority. Ties at
-the same priority are broken by lexicographically lowest name. Resource identity is the template's
-apiVersion + kind + namespace + name. Cluster-scoped resources use empty string for the namespace
-component.
+the same priority are broken by earliest `metadata.creationTimestamp` (first come, first served).
+Resource identity is the template's apiVersion + kind + namespace + name. Cluster-scoped resources
+use empty string for the namespace component.
+
+### Architecture — Fan-In Graph
+
+The Singleton is implemented as a single long-lived Graph (not a Kind). This Graph:
+
+1. Creates the Singleton CRD
+2. Watches all Singleton CRs
+3. Computes claims (one per Singleton) and winners (one per unique target identity)
+4. Applies target resources via forEach template with `lifecycle.apply: Force`
+5. Patches status back to each Singleton CR
+
+The target resource is owned by this singleton controller Graph — not by any per-instance
+sub-Graph. When a Singleton CR is deleted, the Graph re-evaluates: if other claimants remain for
+that identity, the target persists with the new winner's template (force-applied in place via SSA).
+Only when ALL Singletons for an identity are gone does the forEach shrink and the target get pruned.
+
+This eliminates the delete/recreate race that would exist if per-instance Graphs owned the target:
+the resource UID is preserved across holder transitions (zero-downtime failover).
 
 ## ResourceGraphDefinition
 

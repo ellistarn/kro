@@ -38,7 +38,57 @@ spec:
               storage: true
               schema:
                 openAPIV3Schema: >-
-                  ${simpleSchema.toOpenAPI({"types": {"Node": {"id": "string", "template": "any", "patch": "any", "ref": "any", "watch": "any", "def": "any", "forEach": "[]map[string]string", "finalizes": "string", "includeWhen": "[]string", "readyWhen": "[]string", "propagateWhen": "[]string"}, "PrinterColumn": {"name": "string | required=true", "type": "string | required=true", "jsonPath": "string | required=true", "description": "string", "format": "string", "priority": "integer"}, "Condition": {"type": "string | required=true", "status": "string | required=true", "reason": "string", "message": "string", "lastTransitionTime": "string", "observedGeneration": "integer"}}, "spec": {"scope": "string | default=Namespaced", "schema": {"apiVersion": "string | required=true pattern=^[a-z][a-z0-9.-]*/[a-z][a-z0-9]*$", "kind": "string | required=true", "spec": "object", "status": "object | default={}", "types": "object"}, "propagateWhen": "[]string | default=[]", "nodes": "[]Node", "additionalPrinterColumns": "[]PrinterColumn | default=[]"}, "status": {"items": "integer", "conditions": "[]Condition"}}, [])}
+                  ${simpleSchema.toOpenAPI({
+                    "types": {
+                      "Node": {
+                        "id": "string",
+                        "template": "any",
+                        "patch": "any",
+                        "ref": "any",
+                        "watch": "any",
+                        "def": "any",
+                        "forEach": "[]map[string]string",
+                        "finalizes": "string",
+                        "includeWhen": "[]string",
+                        "readyWhen": "[]string",
+                        "propagateWhen": "[]string",
+                        "lifecycle": "object"
+                      },
+                      "PrinterColumn": {
+                        "name": "string | required=true",
+                        "type": "string | required=true",
+                        "jsonPath": "string | required=true",
+                        "description": "string",
+                        "format": "string",
+                        "priority": "integer"
+                      },
+                      "Condition": {
+                        "type": "string | required=true",
+                        "status": "string | required=true",
+                        "reason": "string",
+                        "message": "string",
+                        "lastTransitionTime": "string",
+                        "observedGeneration": "integer"
+                      }
+                    },
+                    "spec": {
+                      "scope": "string | default=Namespaced",
+                      "schema": {
+                        "apiVersion": "string | required=true pattern=^[a-z][a-z0-9.-]*/[a-z][a-z0-9]*$",
+                        "kind": "string | required=true",
+                        "spec": "object",
+                        "status": "object | default={}",
+                        "types": "object"
+                      },
+                      "propagateWhen": "[]string | default=[]",
+                      "nodes": "[]Node",
+                      "additionalPrinterColumns": "[]PrinterColumn | default=[]"
+                    },
+                    "status": {
+                      "items": "integer",
+                      "conditions": "[]Condition"
+                    }
+                  }, [])}
               subresources:
                 status: {}
               additionalPrinterColumns:
