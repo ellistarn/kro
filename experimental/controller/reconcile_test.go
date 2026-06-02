@@ -253,6 +253,182 @@ func TestPruneOrderContributeKeysResolved(t *testing.T) {
 	assert.Equal(t, "/v1/ConfigMap/default/a", ordered[1].Key)
 }
 
+// TestPruneOrderCELNamedNodeUsesNodeID proves that CEL-named nodes (whose
+// metadata.name contains ${...} and thus can't be resolved statically) use
+// the Applied.NodeID field to look up their correct topological position.
+// Without this fallback, CEL-named nodes get maxPos+1 and are deleted first,
+// which can destroy dependencies before their dependents.
+func TestPruneOrderCELNamedNodeUsesNodeID(t *testing.T) {
+	// Build A → B → C. A has a CEL name (can't be resolved statically).
+	// Topological order: A(0), B(1), C(2).
+	// Reverse: C, B, A. A should be last despite its key not matching.
+	nodes := []graphpkg.Node{
+		{ID: "a", Template: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "${graph.metadata.name}"}}},
+		{ID: "b", Template: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "b"}, "data": map[string]any{"ref": "${a.metadata.name}"}}},
+		{ID: "c", Template: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "c"}, "data": map[string]any{"ref": "${b.metadata.name}"}}},
+	}
+	dag, err := dagpkg.BuildDAG(nodes, nil, nil)
+	require.NoError(t, err)
+
+	// The runtime key for A is resolved from the identity label (NodeID="a").
+	candidates := []Applied{
+		{Key: "/v1/ConfigMap/default/my-graph-instance", NodeID: "a"},
+		{Key: "/v1/ConfigMap/default/b", NodeID: "b"},
+		{Key: "/v1/ConfigMap/default/c", NodeID: "c"},
+	}
+
+	ordered := pruneOrderApplied(candidates, []*dagpkg.DAG{dag}, "default", nil)
+
+	require.Len(t, ordered, 3)
+	assert.Equal(t, "/v1/ConfigMap/default/c", ordered[0].Key, "C (most-dependent) should be first")
+	assert.Equal(t, "/v1/ConfigMap/default/b", ordered[1].Key, "B should be second")
+	assert.Equal(t, "/v1/ConfigMap/default/my-graph-instance", ordered[2].Key, "A (root, CEL-named) should be last")
+}
+
+// TestPruneDependencyGating proves that the prune loop does not delete a
+// dependency until all its forward-dependents are confirmed gone. This
+// prevents removing a provider (e.g., IAMRoleSelector providing credentials)
+// while dependents (e.g., VPC needing those credentials for teardown) still
+// exist on the cluster.
+func TestPruneDependencyGating(t *testing.T) {
+	// Build: iamroleselector → vpc → subnet
+	// Forward deps: vpc depends on iamroleselector, subnet depends on vpc.
+	// Correct teardown order: subnet first, then vpc, then iamroleselector.
+	// The test verifies that when subnet still exists (has a finalizer),
+	// vpc is deferred, and iamroleselector is also deferred.
+	nodes := []graphpkg.Node{
+		{ID: "iamroleselector", Template: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "iam"}}},
+		{ID: "vpc", Template: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "vpc"}, "data": map[string]any{"ref": "${iamroleselector.metadata.name}"}}},
+		{ID: "subnet", Template: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "subnet"}, "data": map[string]any{"ref": "${vpc.metadata.name}"}}},
+	}
+	dag, err := dagpkg.BuildDAG(nodes, nil, nil)
+	require.NoError(t, err)
+
+	graphName := "test-graph"
+	graphNS := "default"
+	identityLabel := "subnet." + graphName + "." + graphNS + ".internal.kro.run/type"
+
+	// Subnet exists with a finalizer — it will accept DELETE but won't
+	// disappear. VPC and IAMRoleSelector should be deferred.
+	existingSubnet := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata": map[string]any{
+			"name":            "subnet",
+			"namespace":       "default",
+			"resourceVersion": "1",
+			"finalizers":      []any{"ack.aws/finalizer"},
+			"labels": map[string]any{
+				identityLabel: "template",
+			},
+		},
+	}}
+
+	fakeClient := fake.NewClientBuilder().
+		WithObjects(existingSubnet).
+		Build()
+
+	cluster := &clusterAccess{
+		client: fakeClient,
+		reader: fakeClient,
+	}
+
+	graph := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "experimental.kro.run/v1alpha1",
+		"kind":       "Graph",
+		"metadata": map[string]any{
+			"name":      graphName,
+			"namespace": graphNS,
+		},
+	}}
+	rs := newReconcileScope(graph, nil, nil)
+
+	candidates := []Applied{
+		{Key: "/v1/ConfigMap/default/iam", NodeID: "iamroleselector", NodeType: graphpkg.NodeTypeTemplate},
+		{Key: "/v1/ConfigMap/default/vpc", NodeID: "vpc", NodeType: graphpkg.NodeTypeTemplate},
+		{Key: "/v1/ConfigMap/default/subnet", NodeID: "subnet", NodeType: graphpkg.NodeTypeTemplate},
+	}
+
+	pr := cluster.pruneResources(context.Background(), rs, candidates, nil, []*dagpkg.DAG{dag}, nil, &instanceState{})
+
+	// Subnet should be deleted (pruneDeleted) — preflight passes, DELETE issued.
+	// But it still exists (finalizer holds it). VPC and IAM should be deferred.
+	assert.Equal(t, pruneDeleted, pr.Outcomes["/v1/ConfigMap/default/subnet"],
+		"subnet (leaf) should be deleted")
+	assert.Equal(t, pruneDeferred, pr.Outcomes["/v1/ConfigMap/default/vpc"],
+		"vpc should be deferred until subnet is confirmed gone")
+	assert.Equal(t, pruneDeferred, pr.Outcomes["/v1/ConfigMap/default/iam"],
+		"iamroleselector should be deferred until vpc is confirmed gone")
+}
+
+// TestPruneDependencyGating_DependentsGone proves that when dependents are
+// already gone (NotFound), the dependency is free to be deleted.
+func TestPruneDependencyGating_DependentsGone(t *testing.T) {
+	// Same DAG: iamroleselector → vpc → subnet
+	// But this time subnet and vpc don't exist. IAMRoleSelector should
+	// be deletable because its dependents are confirmed gone.
+	nodes := []graphpkg.Node{
+		{ID: "iamroleselector", Template: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "iam"}}},
+		{ID: "vpc", Template: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "vpc"}, "data": map[string]any{"ref": "${iamroleselector.metadata.name}"}}},
+		{ID: "subnet", Template: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": "subnet"}, "data": map[string]any{"ref": "${vpc.metadata.name}"}}},
+	}
+	dag, err := dagpkg.BuildDAG(nodes, nil, nil)
+	require.NoError(t, err)
+
+	graphName := "test-graph"
+	graphNS := "default"
+	identityLabel := "iamroleselector." + graphName + "." + graphNS + ".internal.kro.run/type"
+
+	// Only iamroleselector exists — subnet and vpc are already gone.
+	existingIAM := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata": map[string]any{
+			"name":            "iam",
+			"namespace":       "default",
+			"resourceVersion": "1",
+			"labels": map[string]any{
+				identityLabel: "template",
+			},
+		},
+	}}
+
+	fakeClient := fake.NewClientBuilder().
+		WithObjects(existingIAM).
+		Build()
+
+	cluster := &clusterAccess{
+		client: fakeClient,
+		reader: fakeClient,
+	}
+
+	graph := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "experimental.kro.run/v1alpha1",
+		"kind":       "Graph",
+		"metadata": map[string]any{
+			"name":      graphName,
+			"namespace": graphNS,
+		},
+	}}
+	rs := newReconcileScope(graph, nil, nil)
+
+	candidates := []Applied{
+		{Key: "/v1/ConfigMap/default/iam", NodeID: "iamroleselector", NodeType: graphpkg.NodeTypeTemplate},
+		{Key: "/v1/ConfigMap/default/vpc", NodeID: "vpc", NodeType: graphpkg.NodeTypeTemplate},
+		{Key: "/v1/ConfigMap/default/subnet", NodeID: "subnet", NodeType: graphpkg.NodeTypeTemplate},
+	}
+
+	pr := cluster.pruneResources(context.Background(), rs, candidates, nil, []*dagpkg.DAG{dag}, nil, &instanceState{})
+
+	// Subnet and VPC are NotFound → confirmed gone → IAM can be deleted.
+	assert.Equal(t, pruneSkipped, pr.Outcomes["/v1/ConfigMap/default/subnet"],
+		"subnet already gone")
+	assert.Equal(t, pruneSkipped, pr.Outcomes["/v1/ConfigMap/default/vpc"],
+		"vpc already gone")
+	assert.Equal(t, pruneDeleted, pr.Outcomes["/v1/ConfigMap/default/iam"],
+		"iamroleselector should be deleted once dependents are confirmed gone")
+}
+
 // TestClassifyAPIErrorDefault proves that unrecognized errors (raw Go errors
 // not wrapped as *StatusError) become NodeSystemError — the safe direction.
 // Misclassifying transient network failures as deterministic (NodeError) means

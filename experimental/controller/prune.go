@@ -66,6 +66,8 @@ func (c *clusterAccess) pruneResources(
 		return result
 	}
 
+	logger := log.FromContext(ctx)
+
 	// Build resource-key-to-node-ID maps from all DAGs.
 	keyToNodeID := map[string]string{}
 	nodeIDToKey := map[string]string{}
@@ -126,6 +128,29 @@ func (c *clusterAccess) pruneResources(
 		DAGs:               dags,
 	}
 
+	// Build the set of candidate keys for dependency gating. A node's
+	// dependencies (nodes it depends on) should only be deleted after the
+	// node itself is confirmed gone. This prevents removing a provider
+	// (e.g., IAMRoleSelector) while dependents (e.g., VPC) still need it.
+	candidateKeySet := make(map[string]bool, len(ordered))
+	for _, a := range ordered {
+		if a.Key != "" {
+			candidateKeySet[a.Key] = true
+		}
+	}
+
+	// confirmedGone tracks keys confirmed absent from the API server during
+	// this reconcile pass (deletePreflight returned NotFound or NotOwned).
+	// A node's dependencies are only eligible for deletion once all the
+	// node's dependents in the candidate set are confirmed gone.
+	confirmedGone := make(map[string]bool)
+
+	// Build a reverse lookup: for each candidate's node ID, collect the
+	// resource keys of its forward-dependents (nodes that depend on it).
+	// Before deleting a candidate, all its forward-dependents that are also
+	// candidates must be confirmed gone.
+	dependentKeys := buildDependentKeysMap(dags, keyToNodeID, nodeIDToKey)
+
 	// deferredDeletes collects finalizer children whose targets were
 	// successfully deleted in this walk. Processed after the walk completes.
 	var deferredDeletes []finalizationChild
@@ -139,9 +164,33 @@ func (c *clusterAccess) pruneResources(
 			continue
 		}
 
+		// Dependency gate: don't delete a node until all nodes that depend
+		// on it (its forward-dependents) are confirmed gone. This enforces
+		// reverse-order teardown across reconcile cycles — a dependency is
+		// only removed after its dependents are fully deleted.
+		// Protected keys (finalization children) are excluded — finalization
+		// handles their lifecycle separately and they should not gate their
+		// target's deletion.
+		nodeID := keyToNodeID[candidate.Key]
+		if nodeID != "" && hasPendingDependents(nodeID, dependentKeys, candidateKeySet, currentKeys, confirmedGone, opts.ProtectedKeys) {
+			logger.V(1).Info("prune deferred: waiting for dependents to be deleted",
+				"key", candidate.Key, "nodeID", nodeID)
+			result.Outcomes[candidate.Key] = pruneDeferred
+			continue
+		}
+
 		cr := c.pruneCandidate(ctx, rs, candidate, opts)
 		if cr.Outcome != pruneNone {
 			result.Outcomes[candidate.Key] = cr.Outcome
+		}
+		// Track confirmed gone from preflight results: pruneSkipped means
+		// the resource doesn't exist or isn't ours (safe to ungate deps).
+		// Patch nodes are also confirmed gone after release — the node's
+		// contribution is removed, so dependencies are no longer coupled.
+		if cr.Outcome == pruneSkipped {
+			confirmedGone[candidate.Key] = true
+		} else if candidate.NodeType == graphpkg.NodeTypePatch && cr.Err == nil && cr.Outcome == pruneNone {
+			confirmedGone[candidate.Key] = true
 		}
 		if len(cr.BlockedReasons) > 0 {
 			result.BlockedReasons = append(result.BlockedReasons, cr.BlockedReasons...)
@@ -464,6 +513,12 @@ func buildKeyPositionMap(dags []*dagpkg.DAG, defaultNS string, scope *scopeResol
 func pruneOrderApplied(candidates []Applied, dags []*dagpkg.DAG, defaultNS string, scope *scopeResolver) []Applied {
 	keyPosition, maxPosition := buildKeyPositionMap(dags, defaultNS, scope)
 
+	// Build a node-ID-to-position map for fallback resolution of CEL-named
+	// nodes whose keys can't be determined statically. The identity label
+	// on managed resources carries the node ID, allowing position lookup
+	// even when staticResourceKey returns "".
+	nodeIDPosition := buildNodeIDPositionMap(dags)
+
 	type scored struct {
 		applied  Applied
 		position int
@@ -471,6 +526,10 @@ func pruneOrderApplied(candidates []Applied, dags []*dagpkg.DAG, defaultNS strin
 	scoredKeys := make([]scored, 0, len(candidates))
 	for _, a := range candidates {
 		pos, ok := keyPosition[a.Key]
+		if !ok && a.NodeID != "" {
+			// Fallback: use node ID from identity label to resolve position.
+			pos, ok = nodeIDPosition[a.NodeID]
+		}
 		if !ok {
 			pos = maxPosition + 1
 		}
@@ -486,6 +545,83 @@ func pruneOrderApplied(candidates []Applied, dags []*dagpkg.DAG, defaultNS strin
 		result[i] = s.applied
 	}
 	return result
+}
+
+// buildNodeIDPositionMap builds a map from node ID → topological position
+// across all DAGs. Used as a fallback for CEL-named nodes whose resource
+// keys can't be resolved statically by buildKeyPositionMap.
+func buildNodeIDPositionMap(dags []*dagpkg.DAG) map[string]int {
+	nodeIDPosition := map[string]int{}
+	for _, d := range dags {
+		for pos, nodeIdx := range d.TopologicalOrder {
+			nodeID := d.Nodes[nodeIdx].ID
+			if existing, ok := nodeIDPosition[nodeID]; !ok || pos > existing {
+				nodeIDPosition[nodeID] = pos
+			}
+		}
+	}
+	return nodeIDPosition
+}
+
+// buildDependentKeysMap builds a map from node ID to the set of resource keys
+// of nodes that depend on it (forward-dependents). Used by the dependency gate
+// to ensure a node is not deleted until all its dependents are confirmed gone.
+//
+// The map includes both hard and soft dependents — soft dependencies (e.g.,
+// propagateWhen references via .ready()) still represent a runtime coupling
+// where the dependent needs the dependency to exist during teardown.
+func buildDependentKeysMap(dags []*dagpkg.DAG, keyToNodeID map[string]string, nodeIDToKey map[string]string) map[string][]string {
+	dependentKeys := map[string][]string{}
+
+	for _, d := range dags {
+		for nodeID, depIndices := range d.Dependents {
+			for _, depIdx := range depIndices {
+				if depIdx < 0 || depIdx >= len(d.Nodes) {
+					continue
+				}
+				depNodeID := d.Nodes[depIdx].ID
+				if depKey, ok := nodeIDToKey[depNodeID]; ok {
+					dependentKeys[nodeID] = append(dependentKeys[nodeID], depKey)
+				}
+			}
+		}
+	}
+
+	return dependentKeys
+}
+
+// hasPendingDependents reports whether any forward-dependent of the given node
+// is still pending deletion (in the candidate set, not in currentKeys, and not
+// yet confirmed gone). This gates deletion: a dependency should not be removed
+// until all its dependents have been confirmed absent from the cluster.
+// Protected keys (finalization children managed by the finalization state
+// machine) are excluded — they should not gate their target's deletion.
+func hasPendingDependents(nodeID string, dependentKeys map[string][]string, candidateKeySet map[string]bool, currentKeys map[string]Applied, confirmedGone map[string]bool, protectedKeys map[string]bool) bool {
+	depKeys, ok := dependentKeys[nodeID]
+	if !ok {
+		return false
+	}
+	for _, dk := range depKeys {
+		// Skip dependents managed by finalization (they shouldn't gate).
+		if protectedKeys[dk] {
+			continue
+		}
+		// Skip dependents that are in the current applied set (not candidates).
+		if currentKeys != nil {
+			if _, inCurrent := currentKeys[dk]; inCurrent {
+				continue
+			}
+		}
+		// Only check dependents that are actually candidates for deletion.
+		if !candidateKeySet[dk] {
+			continue
+		}
+		// If the dependent is a candidate but not confirmed gone, gate.
+		if !confirmedGone[dk] {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------

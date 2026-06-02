@@ -84,6 +84,16 @@ func (r *GraphReconciler) reconcileDelete(ctx context.Context, graph *unstructur
 			}
 		}
 
+		// If any resources were deferred (dependency gate: waiting for
+		// dependents to be deleted first), teardown is not complete.
+		// Requeue to retry after dependents have had time to be finalized.
+		for _, outcome := range pr.Outcomes {
+			if outcome == pruneDeferred {
+				logger.V(1).Info("teardown pending: resources deferred by dependency ordering")
+				return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+			}
+		}
+
 		// If any resource deletion was blocked, surface each distinct reason.
 		if len(pr.BlockedReasons) > 0 {
 			logger.Info("teardown blocked", "reasons", pr.BlockedReasons)
