@@ -3,12 +3,14 @@ package graphcontroller_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -322,4 +324,253 @@ func TestKindCreatesKindDeletionCascade(t *testing.T) {
 		"leaf per-instance Graph not cleaned up")
 
 	t.Log("NESTED DELETION CASCADE PROVED: Parent delete → Leaf delete → ConfigMap deleted → all finalized")
+}
+
+// TestNestedKindDeletionBlocksOnHeldLeaf verifies that a nested Kind cascade
+// blocks the grandparent from completing deletion while a leaf resource is
+// held by an external finalizer.
+//
+// This exercises the interaction between:
+//   - kindInstancePatch (places a finalizer on the instance)
+//   - Reverse topological prune ordering during teardown
+//   - The verification loop in reconcileDelete
+//
+// Bug scenario: during teardown, the prune walk processes kindInstancePatch
+// FIRST (highest topological position → first in reverse order), releasing
+// the instance's finalizer before child templates are verified gone. This
+// allows intermediate resources to complete deletion prematurely, breaking
+// the cascade contract.
+//
+// Expected: Parent instance stays in Terminating until the leaf ConfigMap
+// (held by external finalizer) is fully deleted.
+//
+// Pipeline:
+//   Parent Kind → parent instance → parent Graph
+//     → Leaf Kind instance → leaf Graph → ConfigMap (held by external finalizer)
+//
+// Deletion cascade (correct):
+//   delete parent instance → parent Graph teardown
+//     → deletes Leaf instance → Leaf instance Terminating (finalizer holds)
+//       → leaf Graph teardown → deletes ConfigMap → ConfigMap Terminating (external finalizer)
+//       → BLOCKED — leaf Graph waiting for ConfigMap
+//     → parent Graph verification loop: Leaf instance still exists → BLOCKED
+//   → parent instance stays in Terminating until full subtree is gone
+func TestNestedKindDeletionBlocksOnHeldLeaf(t *testing.T) {
+	// Not parallel: multi-level Kind cascade with finalizer timing assertions
+	// requires deterministic observation of intermediate states.
+	require.NoError(t, waitForCRD(ctx, k8sClient, "kinds.experimental.kro.run", stdlibCRDTimeout))
+
+	ns := "kro-system"
+
+	// Phase 1: Create the child Kind (Leaf) — produces a ConfigMap.
+	t.Log("Phase 1: creating child Kind: HeldLeaf")
+	leafGroup := uniqueGroup()
+	leafKind := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "experimental.kro.run/v1alpha1",
+		"kind":       "Kind",
+		"metadata": map[string]any{
+			"name":      "heldleaf",
+			"namespace": "kro-system",
+		},
+		"spec": map[string]any{
+			"schema": map[string]any{
+				"apiVersion": leafGroup + "/v1alpha1",
+				"kind":       "HeldLeaf",
+				"spec": map[string]any{
+					"data": "string | default=leaf-default",
+				},
+			},
+			"nodes": []any{
+				map[string]any{
+					"id": "leafcm",
+					"template": map[string]any{
+						"apiVersion": "v1",
+						"kind":       "ConfigMap",
+						"metadata": map[string]any{
+							"name":      "${schema.metadata.name}-held",
+							"namespace": "${schema.metadata.namespace}",
+						},
+						"data": map[string]any{
+							"value": "${schema.spec.data}",
+						},
+					},
+				},
+			},
+		},
+	}}
+	require.NoError(t, k8sClient.Create(ctx, leafKind))
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), leafKind) })
+
+	leafCRDName := "heldleaves." + leafGroup
+	t.Log("waiting for HeldLeaf CRD...")
+	require.NoError(t, waitForCRD(ctx, k8sClient, leafCRDName, stdlibCRDTimeout))
+	t.Log("HeldLeaf CRD established")
+
+	// Phase 2: Create the parent Kind (Holder) — creates a HeldLeaf instance.
+	t.Log("Phase 2: creating parent Kind: Holder")
+	parentGroup := uniqueGroup()
+	parentKind := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "experimental.kro.run/v1alpha1",
+		"kind":       "Kind",
+		"metadata": map[string]any{
+			"name":      "holder",
+			"namespace": "kro-system",
+		},
+		"spec": map[string]any{
+			"schema": map[string]any{
+				"apiVersion": parentGroup + "/v1alpha1",
+				"kind":       "Holder",
+				"spec": map[string]any{
+					"leafData": "string | default=from-holder",
+				},
+			},
+			"nodes": []any{
+				map[string]any{
+					"id": "child",
+					"template": map[string]any{
+						"apiVersion": leafGroup + "/v1alpha1",
+						"kind":       "HeldLeaf",
+						"metadata": map[string]any{
+							"name":      "${schema.metadata.name}-child",
+							"namespace": "${schema.metadata.namespace}",
+						},
+						"spec": map[string]any{
+							"data": "${schema.spec.leafData}",
+						},
+					},
+				},
+			},
+		},
+	}}
+	require.NoError(t, k8sClient.Create(ctx, parentKind))
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), parentKind) })
+
+	parentCRDName := "holders." + parentGroup
+	t.Log("waiting for Holder CRD...")
+	require.NoError(t, waitForCRD(ctx, k8sClient, parentCRDName, stdlibCRDTimeout))
+	t.Log("Holder CRD established")
+
+	// Phase 3: Create a Holder instance → Holder Graph → HeldLeaf instance → Leaf Graph → ConfigMap.
+	t.Log("Phase 3: creating Holder instance...")
+	parentGVK := schema.GroupVersionKind{Group: parentGroup, Version: "v1alpha1", Kind: "Holder"}
+	parentInstance := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": parentGroup + "/v1alpha1",
+		"kind":       "Holder",
+		"metadata": map[string]any{
+			"name":      "h-inst",
+			"namespace": ns,
+		},
+		"spec": map[string]any{"leafData": "held-cascade"},
+	}}
+	require.NoError(t, k8sClient.Create(ctx, parentInstance))
+
+	// Wait for the full pipeline to converge.
+	leafGVK := schema.GroupVersionKind{Group: leafGroup, Version: "v1alpha1", Kind: "HeldLeaf"}
+	leafKey := types.NamespacedName{Name: "h-inst-child", Namespace: ns}
+	leafObj := &unstructured.Unstructured{}
+	leafObj.SetGroupVersionKind(leafGVK)
+	t.Log("waiting for HeldLeaf instance (h-inst-child)...")
+	require.NoError(t, waitForResource(ctx, k8sClient, leafKey, leafObj, stdlibReconcileTimeout),
+		"HeldLeaf instance not created by parent pipeline")
+
+	cmGVK := schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"}
+	cmKey := types.NamespacedName{Name: "h-inst-child-held", Namespace: ns}
+	cmObj := &unstructured.Unstructured{}
+	cmObj.SetGroupVersionKind(cmGVK)
+	t.Log("waiting for leaf ConfigMap (h-inst-child-held)...")
+	require.NoError(t, waitForResource(ctx, k8sClient, cmKey, cmObj, stdlibReconcileTimeout),
+		"leaf ConfigMap not created")
+	t.Log("full pipeline converged: Holder → HeldLeaf → ConfigMap")
+
+	// Phase 4: Place an external finalizer on the leaf ConfigMap.
+	// This simulates an external controller (e.g., AWS resource cleanup) that
+	// holds the resource in Terminating while it does out-of-band work.
+	t.Log("Phase 4: placing external finalizer on leaf ConfigMap")
+	require.NoError(t, k8sClient.Get(ctx, cmKey, cmObj))
+	cmObj.SetFinalizers(append(cmObj.GetFinalizers(), "external.example.com/slow-cleanup"))
+	require.NoError(t, k8sClient.Update(ctx, cmObj))
+
+	// Phase 5: Delete the Holder instance. This triggers the full cascade.
+	t.Log("Phase 5: deleting Holder instance — full cascade should block on held ConfigMap")
+	require.NoError(t, k8sClient.Delete(ctx, parentInstance))
+
+	// Wait for the ConfigMap to enter Terminating (proves the cascade propagated
+	// all the way down: parent Graph → delete Leaf instance → Leaf Graph teardown → delete ConfigMap).
+	require.NoError(t, wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, stdlibReconcileTimeout, true,
+		func(ctx context.Context) (bool, error) {
+			obj := &unstructured.Unstructured{}
+			obj.SetGroupVersionKind(cmGVK)
+			if err := k8sClient.Get(ctx, cmKey, obj); err != nil {
+				return false, nil
+			}
+			return obj.GetDeletionTimestamp() != nil, nil
+		}), "ConfigMap should be in Terminating state (external finalizer holds it)")
+	t.Log("Phase 5: ConfigMap is Terminating — external finalizer holds deletion")
+
+	// ─── KEY ASSERTION ───────────────────────────────────────────────────────
+	// The Holder (parent) instance MUST still exist. If the bug is present,
+	// the parent instance will have been prematurely released:
+	//   1. Leaf Graph's prune walk releases kindInstancePatch first (highest
+	//      topo position) → Leaf instance finalizer removed → Leaf instance GONE
+	//   2. Parent Graph verification sees Leaf instance gone → proceeds →
+	//      releases kindInstancePatch → Parent instance finalizer removed → GONE
+	//
+	// Correct behavior: Leaf instance stays in Terminating (kindInstancePatch
+	// NOT released until templates are verified gone) → Parent Graph blocked →
+	// Parent instance stays in Terminating.
+	// ─────────────────────────────────────────────────────────────────────────
+
+	// Give the system a few reconcile cycles to manifest the bug if present.
+	// The prune walk + verification is fast — if the finalizer is going to be
+	// released prematurely, it happens within 2-3 cycles (1-2 seconds).
+	time.Sleep(3 * time.Second)
+
+	parentCheck := &unstructured.Unstructured{}
+	parentCheck.SetGroupVersionKind(parentGVK)
+	err := k8sClient.Get(ctx, types.NamespacedName{Name: "h-inst", Namespace: ns}, parentCheck)
+	require.NoError(t, err,
+		"REGRESSION: Parent instance was prematurely deleted while leaf ConfigMap is still held by external finalizer — "+
+			"the nested cascade contract is broken (kindInstancePatch released before children verified gone)")
+	assert.NotNil(t, parentCheck.GetDeletionTimestamp(),
+		"Parent instance should be in Terminating (held by its finalizer)")
+	t.Log("Phase 5: GOOD — Parent instance correctly blocked in Terminating while leaf is held")
+
+	// Also verify the HeldLeaf instance still exists (intermediate level should also be held).
+	leafCheck := &unstructured.Unstructured{}
+	leafCheck.SetGroupVersionKind(leafGVK)
+	err = k8sClient.Get(ctx, leafKey, leafCheck)
+	require.NoError(t, err,
+		"REGRESSION: HeldLeaf instance was prematurely deleted while its ConfigMap is still held — "+
+			"kindInstancePatch released before child templates are verified gone")
+	assert.NotNil(t, leafCheck.GetDeletionTimestamp(),
+		"HeldLeaf instance should be in Terminating (held by leaf Graph's kindInstancePatch)")
+	t.Log("Phase 5: GOOD — HeldLeaf instance correctly blocked in Terminating")
+
+	// Phase 6: Release the external finalizer — the full cascade should complete.
+	t.Log("Phase 6: releasing external finalizer")
+	finCM := &unstructured.Unstructured{}
+	finCM.SetGroupVersionKind(cmGVK)
+	require.NoError(t, k8sClient.Get(ctx, cmKey, finCM))
+	finCM.SetFinalizers(nil)
+	require.NoError(t, k8sClient.Update(ctx, finCM))
+
+	// Everything should now complete: ConfigMap gone → Leaf Graph finishes →
+	// Leaf instance finalized → Parent Graph finishes → Parent instance finalized.
+	require.NoError(t, waitForDeletion(ctx, k8sClient, cmGVK, cmKey, stdlibReconcileTimeout),
+		"ConfigMap should complete deletion after finalizer release")
+	require.NoError(t, waitForDeletion(ctx, k8sClient, leafGVK, leafKey, stdlibReconcileTimeout),
+		"HeldLeaf instance should complete deletion after cascade unwinds")
+	require.NoError(t, waitForDeletion(ctx, k8sClient, parentGVK,
+		types.NamespacedName{Name: "h-inst", Namespace: ns}, stdlibReconcileTimeout),
+		"Holder instance should complete deletion after full cascade")
+
+	// Graphs should be gone.
+	parentGraphKey := types.NamespacedName{Name: "kind.holder.h-inst", Namespace: ns}
+	require.NoError(t, waitForDeletion(ctx, k8sClient, GraphGVK, parentGraphKey, stdlibReconcileTimeout),
+		"parent per-instance Graph not cleaned up")
+	leafGraphKey := types.NamespacedName{Name: "kind.heldleaf.h-inst-child", Namespace: ns}
+	require.NoError(t, waitForDeletion(ctx, k8sClient, GraphGVK, leafGraphKey, stdlibReconcileTimeout),
+		"leaf per-instance Graph not cleaned up")
+
+	t.Log("NESTED DELETION BLOCKING PROVED: external finalizer on leaf held the entire cascade, then released cleanly")
 }
