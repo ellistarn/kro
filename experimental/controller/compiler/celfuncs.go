@@ -371,5 +371,6 @@ func customCELFunctions() []cel.EnvOption {
 	opts = append(opts, celDependenciesFunction()...)
 	opts = append(opts, celTimeNowFunction(now)...)
 	opts = append(opts, celConditionFunction(now)...)
+	opts = append(opts, celCertificateFunction()...)
 	return opts
 }
