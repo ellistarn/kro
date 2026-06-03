@@ -663,8 +663,9 @@ control what gates this condition by choosing which nodes carry `readyWhen` (see
 Graph Readiness).
 
 The message is a summary line of non-zero state counts followed by up to 10 indented detail lines
-for error-state nodes in the format `<nodeID> (<state>): <reason>`, sorted by node ID. Converging
-states show counts only. Messages are deterministic for the same underlying state, avoiding spurious
+for every non-ready node, sorted by node ID. Nodes with error reasons use the format
+`<nodeID> (<state>): <reason>`; converging nodes (not ready, pending, blocked) use
+`<nodeID> (<state>)`. Messages are deterministic for the same underlying state, avoiding spurious
 status writes.
 
 | Reason        | Status    | Meaning                                |
@@ -680,10 +681,16 @@ status writes.
 
 ```yaml
 message: "47 ready"
-message: "43 ready, 4 pending"
 message: |-
-  1 ready, 1 error, 1 system error
+  43 ready, 4 pending
+    deploy (pending)
+    ingress (pending)
+    secret (pending)
+    svc (pending)
+message: |-
+  1 ready, 1 blocked, 1 error, 1 system error
     authService (error): Forbidden
+    downstream (blocked)
     paymentDb (system error): ServerError
 ```
 

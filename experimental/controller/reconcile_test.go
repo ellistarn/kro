@@ -1128,7 +1128,7 @@ func TestDeriveReadyCondition_MessageFormat(t *testing.T) {
 					PendingNodes:  []string{"ingress"},
 				},
 			},
-			wantMessage: "5 ready, 2 not ready, 1 pending",
+			wantMessage: "5 ready, 2 not ready, 1 pending\n  deploy (not ready)\n  ingress (pending)\n  svc (not ready)",
 		},
 		{
 			name: "error with detail",
@@ -1189,7 +1189,7 @@ func TestDeriveReadyCondition_MessageFormat(t *testing.T) {
 				},
 				nodeErrors: []string{"upstream: 422 invalid"},
 			},
-			wantMessage: "3 ready, 1 blocked, 1 error\n  upstream (error): 422 invalid",
+			wantMessage: "3 ready, 1 blocked, 1 error\n  downstream (blocked)\n  upstream (error): 422 invalid",
 		},
 	}
 	for _, tt := range tests {
@@ -1200,8 +1200,8 @@ func TestDeriveReadyCondition_MessageFormat(t *testing.T) {
 	}
 }
 
-// TestDeriveReadyCondition_Truncation verifies that error detail lines are
-// capped at maxErrorDetails (10) with a "... and N more" suffix.
+// TestDeriveReadyCondition_Truncation verifies that node detail lines are
+// capped at maxNodeDetails (10) with a "... and N more" suffix.
 func TestDeriveReadyCondition_Truncation(t *testing.T) {
 	// Build a state with 13 error nodes.
 	errorNodes := make([]string, 13)
