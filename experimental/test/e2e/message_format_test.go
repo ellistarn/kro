@@ -214,24 +214,29 @@ func TestMessageFormat_ErrorShowsStateCounts(t *testing.T) {
 
 	// Parse into lines.
 	lines := strings.Split(msg, "\n")
-	require.Equal(t, 2, len(lines),
-		"message should have exactly 1 summary line + 1 error detail line")
+	require.Equal(t, 3, len(lines),
+		"message should have 1 summary + 2 detail lines (error + blocked)")
 
 	// Line 1: exact summary line. "source" is ready, "downstream" is blocked,
 	// "broken" is in error.
 	assert.Equal(t, "1 ready, 1 blocked, 1 error", lines[0],
 		"summary line must show exact state counts")
 
-	// Line 2: detail line for the error node.
+	// Line 2: detail line for the error node (alphabetically first: "broken").
 	// Format: "  nodeID (state): reason"
 	assert.True(t, strings.HasPrefix(lines[1], "  broken (error): "),
 		"detail line must start with '  broken (error): ', got: %q", lines[1])
 	assert.Contains(t, lines[1], "division by zero",
 		"detail line must contain the root cause")
+
+	// Line 3: detail line for the blocked node.
+	assert.Equal(t, "  downstream (blocked)", lines[2],
+		"blocked node must appear as detail line without reason")
 }
 
 // TestMessageFormat_NotReadyShowsCounts proves that when a node's readyWhen
-// is unsatisfied, the Ready message is exactly "<N> not ready".
+// is unsatisfied, the Ready message shows a summary line and detail line
+// identifying which node is not ready.
 func TestMessageFormat_NotReadyShowsCounts(t *testing.T) {
 	t.Parallel()
 	ns := createNamespace(t)
@@ -284,9 +289,8 @@ func TestMessageFormat_NotReadyShowsCounts(t *testing.T) {
 	msg := graphReadyMessage(g)
 	t.Logf("NotReady message: %q", msg)
 
-	// Single-node graph with unsatisfied readyWhen: exactly "1 not ready".
-	// No detail lines — NotReady is a converging state, not an error.
-	assert.Equal(t, "1 not ready", msg)
+	// Single-node graph with unsatisfied readyWhen: shows summary + detail.
+	assert.Equal(t, "1 not ready\n  backend (not ready)", msg)
 }
 
 // TestMessageFormat_PendingShowsCounts proves that when a node is gated by
@@ -340,8 +344,8 @@ func TestMessageFormat_PendingShowsCounts(t *testing.T) {
 	msg := graphReadyMessage(g)
 	t.Logf("Pending message: %q", msg)
 
-	// "cfg" is ready, "gated" is pending. No detail lines for converging states.
-	assert.Equal(t, "1 ready, 1 pending", msg)
+	// "cfg" is ready, "gated" is pending. Detail line shows which node is pending.
+	assert.Equal(t, "1 ready, 1 pending\n  gated (pending)", msg)
 }
 
 // TestMessageFormat_ConflictShowsDetail proves that SSA conflicts produce

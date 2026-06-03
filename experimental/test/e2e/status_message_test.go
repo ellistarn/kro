@@ -19,10 +19,10 @@ import (
 
 // TestMessageNamesNodeID_NotReady proves that when a node's readyWhen
 // evaluates to false (the normal "waiting for convergence" case), the
-// Ready condition message shows the not-ready count.
+// Ready condition message shows both the count and the node ID.
 //
-// NotReady is a converging state (Ready=Unknown) — the message shows
-// state counts but not per-node names, since these will self-resolve.
+// NotReady is a converging state (Ready=Unknown) — the message includes
+// per-node detail lines so operators know which node to investigate.
 func TestMessageNamesNodeID_NotReady(t *testing.T) {
 	t.Parallel()
 	ns := createNamespace(t)
@@ -84,10 +84,10 @@ func TestMessageNamesNodeID_NotReady(t *testing.T) {
 
 // TestMessageNamesNodeID_Pending proves that when a node is gated by an
 // unsatisfied propagateWhen, the Ready condition message shows the pending
-// count.
+// count and names the pending node.
 //
-// Pending is a converging state (Ready=Unknown) — the message shows
-// state counts but not per-node names, since these will self-resolve.
+// Pending is a converging state (Ready=Unknown) — the message includes
+// per-node detail lines so operators know which node to investigate.
 func TestMessageNamesNodeID_Pending(t *testing.T) {
 	t.Parallel()
 	ns := createNamespace(t)

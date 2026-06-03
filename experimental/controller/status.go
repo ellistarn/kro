@@ -91,11 +91,15 @@ func (s *reconcileState) deriveCompiledCondition() conditionOutcome {
 // deriveReadyCondition computes the Ready condition from the reconcile outcome.
 //
 // The message format is a summary line with state counts followed by up to
-// maxErrorDetails indented per-node error detail lines:
+// maxNodeDetails indented per-node detail lines for every non-ready node:
 //
-//	43 ready, 2 pending, 1 error, 1 system error
+//	9 ready, 2 not ready, 1 error
 //	  authService (error): 403 Forbidden
-//	  paymentDb (system error): 503 Service Unavailable
+//	  database (not ready)
+//	  cache (not ready)
+//
+// Nodes with error reasons show them; nodes still converging show only their
+// state label. This tells operators exactly which nodes to investigate.
 //
 // Ready is a rollup of node plan states. Each reason maps to the node state
 // blocking convergence. Precedence: SystemError > Error > Conflict > Blocked >
@@ -141,13 +145,13 @@ func (s *reconcileState) deriveReadyCondition() conditionOutcome {
 	return conditionOutcome{conditionTrue, "Ready", msg}
 }
 
-// maxErrorDetails is the maximum number of per-node error detail lines
-// included in the Ready condition message. Beyond this, a truncation
-// note ("... and N more") is appended.
-const maxErrorDetails = 10
+// maxNodeDetails is the maximum number of per-node detail lines included in
+// the Ready condition message. Beyond this, a truncation note is appended.
+const maxNodeDetails = 10
 
 // buildReadyMessage constructs the Ready condition message: a summary line
-// with state counts, followed by indented per-node error detail lines.
+// with state counts, followed by indented per-node detail lines for every
+// node in a non-ready state.
 func (s *reconcileState) buildReadyMessage() string {
 	ps := &s.planSummary
 
@@ -192,26 +196,53 @@ func (s *reconcileState) buildReadyMessage() string {
 		summary += " (" + strings.Join(sorted, "; ") + ")"
 	}
 
-	// Build per-node error detail lines. Each nodeError is "nodeID: reason".
-	// Look up the node's state from PlanSummary to label the detail line.
-	if len(s.nodeErrors) == 0 {
+	// Collect all non-ready node IDs for detail lines.
+	var allNonReady []string
+	allNonReady = append(allNonReady, ps.NotReadyNodes...)
+	allNonReady = append(allNonReady, ps.PendingNodes...)
+	allNonReady = append(allNonReady, ps.BlockedNodes...)
+	allNonReady = append(allNonReady, ps.ConflictNodes...)
+	allNonReady = append(allNonReady, ps.ErrorNodes...)
+	allNonReady = append(allNonReady, ps.SystemErrorNodes...)
+
+	if len(allNonReady) == 0 {
 		return summary
 	}
 
+	// Build reason index from nodeErrors ("nodeID: reason").
+	reasonIndex := make(map[string]string, len(s.nodeErrors))
+	for _, e := range s.nodeErrors {
+		if i := strings.Index(e, ": "); i > 0 {
+			reasonIndex[e[:i]] = e[i+2:]
+		}
+	}
+
+	// Build detail lines: nodes with reasons get "nodeID (state): reason",
+	// others get "nodeID (state)".
 	stateIndex := buildStateIndex(ps)
-	details := formatNodeErrors(s.nodeErrors, stateIndex)
-	if len(details) == 0 {
-		return summary
+	sort.Strings(allNonReady)
+
+	details := make([]string, 0, len(allNonReady))
+	for _, id := range allNonReady {
+		state := stateIndex[id]
+		if state == "" {
+			state = "unknown"
+		}
+		if reason, ok := reasonIndex[id]; ok {
+			details = append(details, fmt.Sprintf("%s (%s): %s", id, state, reason))
+		} else {
+			details = append(details, fmt.Sprintf("%s (%s)", id, state))
+		}
 	}
 
-	// Truncate to maxErrorDetails.
+	// Truncate to maxNodeDetails.
 	var b strings.Builder
 	b.WriteString(summary)
 	shown := details
 	overflow := 0
-	if len(details) > maxErrorDetails {
-		shown = details[:maxErrorDetails]
-		overflow = len(details) - maxErrorDetails
+	if len(details) > maxNodeDetails {
+		shown = details[:maxNodeDetails]
+		overflow = len(details) - maxNodeDetails
 	}
 	for _, d := range shown {
 		b.WriteString("\n  ")
@@ -247,38 +278,7 @@ func buildStateIndex(ps *PlanSummary) map[string]string {
 	return idx
 }
 
-// formatNodeErrors formats nodeError strings ("nodeID: reason") into
-// detail lines ("nodeID (state): reason"), sorted for determinism.
-func formatNodeErrors(nodeErrors []string, stateIndex map[string]string) []string {
-	type entry struct {
-		nodeID string
-		state  string
-		reason string
-	}
-	var entries []entry
-	for _, e := range nodeErrors {
-		i := strings.Index(e, ": ")
-		if i <= 0 {
-			continue
-		}
-		nodeID := e[:i]
-		reason := e[i+2:]
-		state := stateIndex[nodeID]
-		if state == "" {
-			state = "error" // fallback
-		}
-		entries = append(entries, entry{nodeID, state, reason})
-	}
-	// Sort by node ID for determinism.
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].nodeID < entries[j].nodeID
-	})
-	details := make([]string, 0, len(entries))
-	for _, e := range entries {
-		details = append(details, fmt.Sprintf("%s (%s): %s", e.nodeID, e.state, e.reason))
-	}
-	return details
-}
+
 
 // updateStatus writes the Graph's status subresource. Reads the latest version
 // from the API server to avoid conflicts.
