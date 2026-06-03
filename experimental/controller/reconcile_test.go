@@ -2471,3 +2471,160 @@ func TestForceTakeover_FullPruneSkipsAdoptedResource(t *testing.T) {
 		client.ObjectKeyFromObject(existingVPC), check),
 		"VPC must survive — new holder adopted it before old holder's teardown")
 }
+
+// ---------------------------------------------------------------------------
+// Patch release error classification tests
+//
+// These verify that Phase 2 (patch release during teardown) classifies errors
+// correctly per 005-reconciliation.md § Teardown:
+//   - 422 Invalid (immutable) → abandon (no error propagated)
+//   - 403 Forbidden (RBAC) → propagate error (causes retry)
+//   - 5xx (server error) → propagate error (causes retry)
+//   - NotFound → success (target already gone)
+// ---------------------------------------------------------------------------
+
+// patchReleaseTestSetup creates a clusterAccess with a fake client that
+// intercepts Patch calls (SSA apply) with the given error. The target
+// resource exists (Get succeeds) so the pre-check passes.
+func patchReleaseTestSetup(t *testing.T, patchErr error) (*clusterAccess, *reconcileScope) {
+	t.Helper()
+
+	graphName := "test-graph"
+	graphNS := "default"
+	identityLabel := "mypatch." + graphName + "." + graphNS + ".internal.kro.run/type"
+
+	// Target resource exists — pre-check Get will succeed.
+	target := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata": map[string]any{
+			"name":            "target",
+			"namespace":       "default",
+			"resourceVersion": "1",
+			"labels": map[string]any{
+				identityLabel: "patch",
+			},
+		},
+	}}
+
+	fakeClient := fake.NewClientBuilder().
+		WithObjects(target).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, client client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if patchErr != nil {
+					return patchErr
+				}
+				return client.Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	cluster := &clusterAccess{
+		client: fakeClient,
+		reader: fakeClient,
+	}
+
+	graph := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "experimental.kro.run/v1alpha1",
+		"kind":       "Graph",
+		"metadata": map[string]any{
+			"name":      graphName,
+			"namespace": graphNS,
+		},
+	}}
+	rs := newReconcileScope(graph, nil, nil)
+	return cluster, rs
+}
+
+// TestPatchRelease_422Invalid_Abandoned proves that a 422 (Invalid) error
+// from release-apply (immutable field) is abandoned — no error propagated.
+// The field is physically impossible to release; retrying is futile.
+func TestPatchRelease_422Invalid_Abandoned(t *testing.T) {
+	invalidErr := apierrors.NewInvalid(
+		schema.GroupKind{Group: "", Kind: "ConfigMap"},
+		"target",
+		nil,
+	)
+	cluster, rs := patchReleaseTestSetup(t, invalidErr)
+
+	candidates := []Applied{
+		{Key: "/v1/ConfigMap/default/target", NodeID: "mypatch", NodeType: graphpkg.NodeTypePatch},
+	}
+	pr := cluster.pruneResources(context.Background(), rs, candidates, nil, nil, nil, &instanceState{})
+
+	// 422 → abandoned. No error propagated — teardown should proceed.
+	assert.Nil(t, pr.Err,
+		"422 Invalid should be abandoned, not propagated — immutable fields can't be released")
+}
+
+// TestPatchRelease_403Forbidden_Propagated proves that a 403 (Forbidden)
+// error from release-apply is propagated — causes retry. An operator
+// needs to fix RBAC; the system holds in a visible stuck state.
+func TestPatchRelease_403Forbidden_Propagated(t *testing.T) {
+	forbiddenErr := apierrors.NewForbidden(
+		schema.GroupResource{Group: "", Resource: "configmaps"},
+		"target",
+		fmt.Errorf("RBAC: access denied"),
+	)
+	cluster, rs := patchReleaseTestSetup(t, forbiddenErr)
+
+	candidates := []Applied{
+		{Key: "/v1/ConfigMap/default/target", NodeID: "mypatch", NodeType: graphpkg.NodeTypePatch},
+	}
+	pr := cluster.pruneResources(context.Background(), rs, candidates, nil, nil, nil, &instanceState{})
+
+	// 403 → propagated. Teardown should retry until operator fixes RBAC.
+	assert.NotNil(t, pr.Err,
+		"403 Forbidden should be propagated — operator must fix RBAC")
+}
+
+// TestPatchRelease_500ServerError_Propagated proves that a 5xx error from
+// release-apply is propagated — causes retry. Transient server failure.
+func TestPatchRelease_500ServerError_Propagated(t *testing.T) {
+	serverErr := apierrors.NewInternalError(fmt.Errorf("etcd timeout"))
+	cluster, rs := patchReleaseTestSetup(t, serverErr)
+
+	candidates := []Applied{
+		{Key: "/v1/ConfigMap/default/target", NodeID: "mypatch", NodeType: graphpkg.NodeTypePatch},
+	}
+	pr := cluster.pruneResources(context.Background(), rs, candidates, nil, nil, nil, &instanceState{})
+
+	// 5xx → propagated. Teardown should retry.
+	assert.NotNil(t, pr.Err,
+		"500 InternalServerError should be propagated — transient, retry")
+}
+
+// TestPatchRelease_NotFound_Success proves that when the target resource
+// doesn't exist (already deleted), release-apply is a no-op — no error.
+func TestPatchRelease_NotFound_Success(t *testing.T) {
+	// No interceptor error needed — target doesn't exist in the fake client.
+	graphName := "test-graph"
+	graphNS := "default"
+
+	// No target resource in the fake client — Get will return NotFound.
+	fakeClient := fake.NewClientBuilder().Build()
+
+	cluster := &clusterAccess{
+		client: fakeClient,
+		reader: fakeClient,
+	}
+
+	graph := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "experimental.kro.run/v1alpha1",
+		"kind":       "Graph",
+		"metadata": map[string]any{
+			"name":      graphName,
+			"namespace": graphNS,
+		},
+	}}
+	rs := newReconcileScope(graph, nil, nil)
+
+	candidates := []Applied{
+		{Key: "/v1/ConfigMap/default/target", NodeID: "mypatch", NodeType: graphpkg.NodeTypePatch},
+	}
+	pr := cluster.pruneResources(context.Background(), rs, candidates, nil, nil, nil, &instanceState{})
+
+	// NotFound → success. No error propagated.
+	assert.Nil(t, pr.Err,
+		"NotFound should be treated as success — target already gone")
+}

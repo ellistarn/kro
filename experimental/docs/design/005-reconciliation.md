@@ -139,12 +139,45 @@ revision's metadata still applies to resources being pruned from it.
 #### Teardown
 
 When a Graph is deleted — by its owner, by GC, or directly — every node becomes a prune
-candidate — the prune algorithm above runs in full. Ordering comes from the active revision's DAG
-(distinct from reconcile-time prune, where ordering comes from the superseded revision that defined
-the pruned resources). If the revision was deleted (ownerReference cascade race), the controller
-regenerates the DAG from spec. Teardown is blocked until ordering is available — never degrade to
-unordered deletion. If nodes persist (finalizers), requeue. Once all nodes are pruned, remove the
-Graph's finalizer.
+candidate. Ordering comes from the active revision's DAG (distinct from reconcile-time prune,
+where ordering comes from the superseded revision that defined the pruned resources). If the
+revision was deleted (ownerReference cascade race), the controller regenerates the DAG from spec.
+Teardown is blocked until ordering is available — never degrade to unordered deletion.
+
+Teardown proceeds in two phases:
+
+1. **Template phase** — delete all `template:` resources (reverse DAG walk, finalization gating,
+   dependency gating). Verify every template resource is confirmed absent from the API server.
+   Block until complete.
+2. **Patch release phase** — [release apply](003-ownership.md#release-apply) all `patch:` fields.
+   Only executes after Phase 1 passes.
+
+Phase separation is required because a `patch:` node may hold a finalizer on the Graph's owner.
+Releasing that finalizer signals upstream that the cascade is complete. If released before
+templates are verified gone, the owner completes deletion while the subtree is still tearing down.
+
+No explicit cross-graph deletion coordination exists. A `patch:` that holds a finalizer on a
+shared resource provides implicit sequencing — it holds the resource in Terminating until the
+patching Graph completes its own teardown.
+
+Release errors are classified into three categories:
+
+- **Correct configuration** (422 Invalid — immutable field, schema constraint) — the release is
+  physically impossible. The API server is working as designed. Abandon; the field persists with a
+  stale manager entry. No operator action required.
+- **Incorrect configuration** (403 Forbidden, 409 Conflict) — the release should succeed but the
+  environment is misconfigured. Retry; teardown holds in a visible stuck state until an operator
+  fixes RBAC or ownership.
+- **Transient error** (5xx, 429, network) — the release should succeed, something temporary
+  happened. Retry.
+
+Unlike propagation — where any 4xx resolves via new inputs (spec change) — teardown has no spec
+to change. Retry is the only path to operator visibility for fixable failures.
+
+The lifecycle-critical release (removing a finalizer from `metadata.finalizers`) is never subject
+to immutability — it always falls into the retry categories and recovers naturally.
+
+Once both phases complete, remove the Graph's finalizer.
 
 #### Finalization
 

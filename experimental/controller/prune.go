@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -279,10 +280,16 @@ func (c *clusterAccess) pruneCandidate(
 			return pruneCandidateResult{}
 		}
 		if _, err := releaseApply(ctx, c.client, gvk, nn.Namespace, nn.Name, opts.FieldOwner, candidate.HasStatus); err != nil {
-			logger.Error(err, "releasing contribution fields", "key", key)
-		} else {
-			logger.Info("released contribution fields", "key", key)
+			// Classify release errors per 005-reconciliation.md § Teardown:
+			// - 422 Invalid (immutable field) → abandon, will never succeed
+			// - Everything else (403, 409, 5xx, network) → propagate for retry
+			if apierrors.IsInvalid(err) {
+				logger.Info("release abandoned: field is immutable", "key", key, "error", err)
+				return pruneCandidateResult{}
+			}
+			return pruneCandidateResult{Err: fmt.Errorf("releasing patch fields for %s: %w", key, err)}
 		}
+		logger.Info("released contribution fields", "key", key)
 		return pruneCandidateResult{}
 
 	default:

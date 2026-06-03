@@ -264,3 +264,177 @@ func TestExternalFinalizerForegroundDeletion(t *testing.T) {
 		"Graph teardown should complete after ConfigMap is gone")
 	t.Log("Phase 5: FOREGROUND DELETION PROVED — external finalizer held, then released, full cascade completed")
 }
+
+// TestPatchOnlyGraphTeardown verifies that a Graph with only patch nodes
+// (no templates) completes teardown correctly. Phase 1 (template deletion)
+// is empty and passes immediately. Phase 2 releases patch fields.
+//
+// This exercises the degenerate case where the phase split has no work
+// in Phase 1 — teardown must not hang or error when templateCandidates is empty.
+func TestPatchOnlyGraphTeardown(t *testing.T) {
+	t.Parallel()
+	ns := createNamespace(t)
+
+	cmGVK := schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"}
+	cmKey := types.NamespacedName{Name: "patch-target", Namespace: ns}
+
+	// Create the target ConfigMap that the Graph will patch.
+	target := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata": map[string]any{
+			"name":      "patch-target",
+			"namespace": ns,
+		},
+		"data": map[string]any{"original": "value"},
+	}}
+	require.NoError(t, k8sClient.Create(ctx, target))
+
+	// Create a Graph with only a patch node — no templates.
+	graph := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "experimental.kro.run/v1alpha1",
+		"kind":       "Graph",
+		"metadata": map[string]any{
+			"name":      "patch-only",
+			"namespace": ns,
+		},
+		"spec": map[string]any{
+			"nodes": []any{
+				map[string]any{
+					"id": "contribution",
+					"patch": map[string]any{
+						"apiVersion": "v1",
+						"kind":       "ConfigMap",
+						"metadata": map[string]any{
+							"name":      "patch-target",
+							"namespace": ns,
+						},
+						"data": map[string]any{"contributed": "by-graph"},
+					},
+				},
+			},
+		},
+	}}
+	require.NoError(t, k8sClient.Create(ctx, graph))
+	require.NoError(t, waitForGraphReady(ctx, k8sClient,
+		types.NamespacedName{Name: "patch-only", Namespace: ns}))
+
+	// Verify the patch was applied.
+	require.NoError(t, waitForField(ctx, k8sClient, cmGVK, cmKey,
+		[]string{"data", "contributed"}, "by-graph"))
+	t.Log("patch applied: ConfigMap has contributed field")
+
+	// Delete the Graph. Teardown should complete (Phase 1 empty, Phase 2 releases patch).
+	graphObj := &unstructured.Unstructured{}
+	graphObj.SetGroupVersionKind(GraphGVK)
+	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: "patch-only", Namespace: ns}, graphObj))
+	require.NoError(t, k8sClient.Delete(ctx, graphObj))
+
+	require.NoError(t, waitForDeletion(ctx, k8sClient, GraphGVK,
+		types.NamespacedName{Name: "patch-only", Namespace: ns}),
+		"patch-only Graph teardown should complete without templates")
+
+	// Target ConfigMap should still exist (patches don't delete targets).
+	cm := &unstructured.Unstructured{}
+	cm.SetGroupVersionKind(cmGVK)
+	require.NoError(t, k8sClient.Get(ctx, cmKey, cm))
+	// The contributed field should be released (gone).
+	_, found, _ := unstructured.NestedString(cm.Object, "data", "contributed")
+	assert.False(t, found, "contributed field should be released after Graph teardown")
+	t.Log("PATCH-ONLY TEARDOWN PROVED: Graph deleted, patch released, target intact")
+}
+
+// TestCrossGraphPatchTargetGone verifies that when a Graph's patch target
+// no longer exists (deleted by another Graph or externally), teardown still
+// completes. The release-apply gets NotFound — treated as a no-op.
+//
+// This exercises the cross-graph scenario: Graph A owns a resource (template),
+// Graph B patches it (patch). Graph A is deleted first (resource gone), then
+// Graph B is deleted. Graph B's Phase 2 must not block on the missing target.
+func TestCrossGraphPatchTargetGone(t *testing.T) {
+	t.Parallel()
+	ns := createNamespace(t)
+
+	cmGVK := schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"}
+	cmKey := types.NamespacedName{Name: "shared-resource", Namespace: ns}
+
+	// Graph A: owns the resource (template).
+	graphA := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "experimental.kro.run/v1alpha1",
+		"kind":       "Graph",
+		"metadata": map[string]any{
+			"name":      "owner-graph",
+			"namespace": ns,
+		},
+		"spec": map[string]any{
+			"nodes": []any{
+				map[string]any{
+					"id": "resource",
+					"template": map[string]any{
+						"apiVersion": "v1",
+						"kind":       "ConfigMap",
+						"metadata":   map[string]any{"name": "shared-resource", "namespace": ns},
+						"data":       map[string]any{"owner": "graph-a"},
+					},
+				},
+			},
+		},
+	}}
+	require.NoError(t, k8sClient.Create(ctx, graphA))
+	cm := &unstructured.Unstructured{}
+	cm.SetGroupVersionKind(cmGVK)
+	require.NoError(t, waitForResource(ctx, k8sClient, cmKey, cm))
+
+	// Graph B: patches the resource (no finalizer, pure field contribution).
+	graphB := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "experimental.kro.run/v1alpha1",
+		"kind":       "Graph",
+		"metadata": map[string]any{
+			"name":      "patcher-graph",
+			"namespace": ns,
+		},
+		"spec": map[string]any{
+			"nodes": []any{
+				map[string]any{
+					"id": "contribution",
+					"patch": map[string]any{
+						"apiVersion": "v1",
+						"kind":       "ConfigMap",
+						"metadata":   map[string]any{"name": "shared-resource", "namespace": ns},
+						"data":       map[string]any{"extra": "from-graph-b"},
+					},
+				},
+			},
+		},
+	}}
+	require.NoError(t, k8sClient.Create(ctx, graphB))
+	require.NoError(t, waitForGraphReady(ctx, k8sClient,
+		types.NamespacedName{Name: "patcher-graph", Namespace: ns}))
+	require.NoError(t, waitForField(ctx, k8sClient, cmGVK, cmKey,
+		[]string{"data", "extra"}, "from-graph-b"))
+	t.Log("both graphs applied: ConfigMap has fields from both")
+
+	// Delete Graph A first — the ConfigMap is deleted.
+	graphAObj := &unstructured.Unstructured{}
+	graphAObj.SetGroupVersionKind(GraphGVK)
+	require.NoError(t, k8sClient.Get(ctx,
+		types.NamespacedName{Name: "owner-graph", Namespace: ns}, graphAObj))
+	require.NoError(t, k8sClient.Delete(ctx, graphAObj))
+	require.NoError(t, waitForDeletion(ctx, k8sClient, GraphGVK,
+		types.NamespacedName{Name: "owner-graph", Namespace: ns}))
+	require.NoError(t, waitForDeletion(ctx, k8sClient, cmGVK, cmKey))
+	t.Log("Graph A deleted, ConfigMap gone")
+
+	// Delete Graph B — its patch target no longer exists.
+	// Phase 2 release-apply should get NotFound and treat it as a no-op.
+	graphBObj := &unstructured.Unstructured{}
+	graphBObj.SetGroupVersionKind(GraphGVK)
+	require.NoError(t, k8sClient.Get(ctx,
+		types.NamespacedName{Name: "patcher-graph", Namespace: ns}, graphBObj))
+	require.NoError(t, k8sClient.Delete(ctx, graphBObj))
+	require.NoError(t, waitForDeletion(ctx, k8sClient, GraphGVK,
+		types.NamespacedName{Name: "patcher-graph", Namespace: ns}),
+		"patcher Graph teardown should complete even though patch target is gone")
+
+	t.Log("CROSS-GRAPH PATCH TARGET GONE PROVED: patcher teardown completes when target is already deleted")
+}

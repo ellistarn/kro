@@ -54,20 +54,38 @@ func (r *GraphReconciler) reconcileDelete(ctx context.Context, graph *unstructur
 		teardownState := &instanceState{}
 
 		// -----------------------------------------------------------------------
-		// Delegate to pruneResources: all keys are candidates, currentKeys empty.
+		// Phase separation: templates and patches have different teardown
+		// semantics. Templates create resources — teardown deletes them and
+		// verifies they're gone. Patches borrow fields on external resources
+		// — teardown releases ownership. Releasing a patch may remove a
+		// finalizer from the owner (e.g., kindInstancePatch), signaling
+		// upstream watchers that the cascade is complete. This must not
+		// happen until all managed template resources are confirmed deleted.
+		//
+		// Invariant: clean up what you own before releasing what you borrowed.
 		// -----------------------------------------------------------------------
-		pr := cluster.pruneResources(ctx, rs, candidates, nil, teardownDAGs, teardownEval, teardownState)
-
-		// Verify deleted resources are gone — only check keys with pruneDeleted outcome.
+		var templateCandidates []Applied
+		var patchCandidates []Applied
 		for _, a := range candidates {
+			if a.NodeType == graphpkg.NodeTypePatch {
+				patchCandidates = append(patchCandidates, a)
+			} else {
+				templateCandidates = append(templateCandidates, a)
+			}
+		}
+
+		// -----------------------------------------------------------------------
+		// Phase 1: Delete template resources (reverse topological order,
+		// finalization gating, dependency gating).
+		// -----------------------------------------------------------------------
+		pr := cluster.pruneResources(ctx, rs, templateCandidates, nil, teardownDAGs, teardownEval, teardownState)
+
+		// Verify template resources are gone.
+		for _, a := range templateCandidates {
 			if a.Key == "" {
 				continue
 			}
-			// Only verify template resources that were actually deleted.
 			outcome, hasOutcome := pr.Outcomes[a.Key]
-			if a.NodeType == graphpkg.NodeTypePatch {
-				continue // patches are released, not deleted
-			}
 			if hasOutcome && outcome != pruneDeleted {
 				continue // not deleted — skip verification
 			}
@@ -121,6 +139,18 @@ func (r *GraphReconciler) reconcileDelete(ctx context.Context, graph *unstructur
 
 		if pr.Err != nil {
 			return ctrl.Result{}, pr.Err
+		}
+
+		// -----------------------------------------------------------------------
+		// Phase 2: Release patch fields. Only reached after all template
+		// resources are verified gone — safe to release lifecycle invariants
+		// (e.g., owner finalizers held by kindInstancePatch).
+		// -----------------------------------------------------------------------
+		if len(patchCandidates) > 0 {
+			patchResult := cluster.pruneResources(ctx, rs, patchCandidates, nil, teardownDAGs, teardownEval, teardownState)
+			if patchResult.Err != nil {
+				return ctrl.Result{}, patchResult.Err
+			}
 		}
 	} else {
 		logger.Info("no managed resources to tear down, removing finalizer")
