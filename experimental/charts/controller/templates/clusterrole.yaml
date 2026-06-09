@@ -12,13 +12,15 @@ rules:
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Managed resources — the controller applies arbitrary resource types
   # via SSA. The specific types are determined at runtime by Graph specs.
+  # "update" is required for RBAC escalation prevention: the controller
+  # must hold any verb it grants in managed Role/ClusterRole resources.
   - apiGroups: ["*"]
     resources: ["*"]
-    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Status subresource on managed resources (for Contribute templates)
   - apiGroups: ["*"]
     resources: ["*/status"]
-    verbs: ["get", "patch"]
+    verbs: ["get", "update", "patch"]
   # Events
   - apiGroups: [""]
     resources: ["events"]
