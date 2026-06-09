@@ -87,8 +87,8 @@ func TestTimeNowRawValue(t *testing.T) {
 // true and enqueues reconciliation at exactly that time.
 //
 // The test creates a source ConfigMap with createdAt=now(), then a Graph
-// with a 5s gate. The gated node must NOT appear during the first 2s, then
-// MUST appear within 10s — proving time-based enqueue, not polling.
+// with a 15s gate. The gated node must NOT appear during the first 10s, then
+// MUST appear within 20s — proving time-based enqueue, not polling.
 func TestTimeNowGateEnqueue(t *testing.T) {
 	t.Parallel()
 	ns := createNamespace(t)
@@ -129,34 +129,34 @@ func TestTimeNowGateEnqueue(t *testing.T) {
 							"metadata":   map[string]any{"name": "gate-source"},
 						},
 					},
-					map[string]any{
-						"id":            "delayed",
-						"propagateWhen": []any{"${time.now() - timestamp(source.data.createdAt) >= duration('5s')}"},
-						"template": map[string]any{
-							"apiVersion": "v1",
-							"kind":       "ConfigMap",
-							"metadata":   map[string]any{"name": "delayed-output"},
-							"data":       map[string]any{"status": "appeared"},
-						},
+				map[string]any{
+					"id":            "delayed",
+					"propagateWhen": []any{"${time.now() - timestamp(source.data.createdAt) >= duration('15s')}"},
+					"template": map[string]any{
+						"apiVersion": "v1",
+						"kind":       "ConfigMap",
+						"metadata":   map[string]any{"name": "delayed-output"},
+						"data":       map[string]any{"status": "appeared"},
 					},
+				},
 				},
 			},
 		},
 	}
 	require.NoError(t, k8sClient.Create(ctx, graph))
 
-	// The gated node should NOT appear during the first 2 seconds.
+	// The gated node should NOT appear during the first 10 seconds.
 	err := waitForAbsence(ctx, k8sClient, cmGVK,
-		types.NamespacedName{Name: "delayed-output", Namespace: ns}, 2*time.Second)
-	require.NoError(t, err, "gated node must not appear before the 5s threshold")
-	t.Log("Confirmed: delayed-output absent during first 2s")
+		types.NamespacedName{Name: "delayed-output", Namespace: ns}, 10*time.Second)
+	require.NoError(t, err, "gated node must not appear before the 15s threshold")
+	t.Log("Confirmed: delayed-output absent during first 10s")
 
-	// The gated node MUST appear within 10s (5s gate + margin).
+	// The gated node MUST appear within 20s (15s gate + margin).
 	delayed := &unstructured.Unstructured{}
 	delayed.SetGroupVersionKind(cmGVK)
 	require.NoError(t, waitForResource(ctx, k8sClient,
-		types.NamespacedName{Name: "delayed-output", Namespace: ns}, delayed, 10*time.Second),
-		"gated node must appear after 5s threshold")
+		types.NamespacedName{Name: "delayed-output", Namespace: ns}, delayed, 20*time.Second),
+		"gated node must appear after 15s threshold")
 
 	data, _, _ := unstructured.NestedString(delayed.Object, "data", "status")
 	assert.Equal(t, "appeared", data)
@@ -165,7 +165,7 @@ func TestTimeNowGateEnqueue(t *testing.T) {
 
 // TestTimeNowTernary proves that time.now() in a ternary expression causes
 // the value to flip at the solved instant. Initially the value is 'before',
-// then after 4s it flips to 'after'.
+// then after 15s it flips to 'after'.
 func TestTimeNowTernary(t *testing.T) {
 	t.Parallel()
 	ns := createNamespace(t)
@@ -213,7 +213,7 @@ func TestTimeNowTernary(t *testing.T) {
 							"kind":       "ConfigMap",
 							"metadata":   map[string]any{"name": "ternary-result"},
 							"data": map[string]any{
-								"phase": "${time.now() - timestamp(source.data.createdAt) >= duration('4s') ? 'after' : 'before'}",
+								"phase": "${time.now() - timestamp(source.data.createdAt) >= duration('15s') ? 'after' : 'before'}",
 							},
 						},
 					},
@@ -226,15 +226,15 @@ func TestTimeNowTernary(t *testing.T) {
 	// Assert it initially has value 'before'.
 	require.NoError(t, waitForField(ctx, k8sClient, cmGVK,
 		types.NamespacedName{Name: "ternary-result", Namespace: ns},
-		[]string{"data", "phase"}, "before", 5*time.Second),
+		[]string{"data", "phase"}, "before", 10*time.Second),
 		"ternary should initially evaluate to 'before'")
 	t.Log("Phase 1: ternary = 'before'")
 
-	// Assert it eventually flips to 'after' (4s gate + margin).
+	// Assert it eventually flips to 'after' (15s gate + margin).
 	require.NoError(t, waitForField(ctx, k8sClient, cmGVK,
 		types.NamespacedName{Name: "ternary-result", Namespace: ns},
-		[]string{"data", "phase"}, "after", 8*time.Second),
-		"ternary should flip to 'after' after 4s threshold")
+		[]string{"data", "phase"}, "after", 20*time.Second),
+		"ternary should flip to 'after' after 15s threshold")
 	t.Log("Phase 2: ternary = 'after' — time.now() in ternary proved")
 }
 

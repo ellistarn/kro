@@ -177,7 +177,7 @@ spec:
                         "kind": schema.spec.schema.kind,
                         "metadata": {
                           "name": instance.metadata.name,
-                          "namespace": instance.metadata.namespace
+                          "namespace": instance.?metadata.?namespace.orValue("")
                         }
                       }}]
                       + schema.spec.resources.filter(r, has(r.externalRef) && !has(r.externalRef.metadata.selector)).map(r,
@@ -209,7 +209,7 @@ spec:
                             "labels": (has(r.template.metadata) && has(r.template.metadata.labels) ? r.template.metadata.labels : {}).merge({
                               "kro.run/instance-id": string(instance.metadata.uid),
                               "kro.run/instance-name": instance.metadata.name,
-                              "kro.run/instance-namespace": instance.metadata.namespace,
+                              "kro.run/instance-namespace": instance.?metadata.?namespace.orValue(""),
                               "kro.run/instance-group": schema.spec.schema.group,
                               "kro.run/instance-version": schema.spec.schema.apiVersion,
                               "kro.run/instance-kind": schema.spec.schema.kind
@@ -223,7 +223,7 @@ spec:
                         "kind": schema.spec.schema.kind,
                         "metadata": {
                           "name": instance.metadata.name,
-                          "namespace": instance.metadata.namespace,
+                          "namespace": instance.?metadata.?namespace.orValue(""),
                           "finalizers": ["experimental.kro.run/graph"]
                         },
                         "status": {
