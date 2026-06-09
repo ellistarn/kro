@@ -21,8 +21,9 @@ import (
 
 // ChildScope holds the identifiers visible in a child Graph's CEL environment.
 type ChildScope struct {
-	NodeIDs     []string // child node IDs (from spec.nodes[].id)
-	ForEachVars []string // child forEach variable names
+	NodeIDs      []string // child node IDs (from spec.nodes[].id)
+	WatchNodeIDs []string // child Watch node IDs (typed as list(dyn) for comprehensions)
+	ForEachVars  []string // child forEach variable names
 }
 
 // deferredExpr is a single deferred expression found in a parent node's body.
@@ -79,7 +80,7 @@ func compileDeferredExpressions(spec *graph.GraphSpec) error {
 		// validation — the child controller will catch errors at its own
 		// compile time. We only validate when we can statically determine
 		// the full child scope.
-		if len(deferred) > 0 && len(scope.NodeIDs) > 0 {
+		if len(deferred) > 0 && (len(scope.NodeIDs) > 0 || len(scope.WatchNodeIDs) > 0) {
 			if err := validateDeferredExprs(node.ID, scope, deferred); err != nil {
 				return err
 			}
@@ -92,7 +93,7 @@ func compileDeferredExpressions(spec *graph.GraphSpec) error {
 		// Per 004-compilation.md § Recursive Compilation: "When a forEach
 		// template produces a child Graph CR..." — only forEach nodes trigger
 		// pre-compilation (they stamp N identical children from one template).
-		if body != nil && len(scope.NodeIDs) > 0 && node.ForEach != nil {
+		if body != nil && (len(scope.NodeIDs) > 0 || len(scope.WatchNodeIDs) > 0) && node.ForEach != nil {
 			if err := precompileChildGraph(node.ID, body); err != nil {
 				return err
 			}
@@ -141,9 +142,15 @@ func ExtractChildScopeFromBody(body map[string]any) ChildScope {
 		if !ok {
 			continue
 		}
-		// Extract node ID.
+		// Extract node ID — classify as Watch vs non-Watch.
+		// Watch nodes are typed as list(dyn) to enable comprehension macros
+		// (.filter, .map, .exists) in deferred CEL expressions.
 		if id, ok := nodeMap["id"].(string); ok {
-			scope.NodeIDs = append(scope.NodeIDs, id)
+			if _, isWatch := nodeMap["watch"]; isWatch {
+				scope.WatchNodeIDs = append(scope.WatchNodeIDs, id)
+			} else {
+				scope.NodeIDs = append(scope.NodeIDs, id)
+			}
 		}
 		// Extract forEach variable names from child nodes.
 		if fe, ok := nodeMap["forEach"]; ok {
@@ -177,10 +184,13 @@ func extractForEachVarNames(forEach any) []string {
 // validateDeferredExprs builds a child CEL environment from the child scope
 // and parses + type-checks each deferred expression's inner CEL expressions against it.
 func validateDeferredExprs(parentNodeID string, scope ChildScope, exprs []deferredExpr) error {
-	// Build a minimal CEL environment with child identifiers as dyn.
+	// Build a minimal CEL environment with child identifiers.
+	// Non-watch node IDs and forEach vars are typed as dyn (any resource shape).
+	// Watch node IDs are typed as list(dyn) so comprehension macros work.
 	allIDs := append(scope.NodeIDs, scope.ForEachVars...)
 	env, err := krocel.DefaultEnvironment(
 		krocel.WithResourceIDs(allIDs),
+		krocel.WithListVariables(scope.WatchNodeIDs),
 		krocel.WithCustomDeclarations(customCELFunctions()),
 		krocel.WithCustomDeclarations([]cel.EnvOption{
 			cel.Variable(ReservedNodeReadyVar, cel.MapType(cel.StringType, cel.BoolType)),

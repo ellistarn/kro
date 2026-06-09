@@ -155,7 +155,7 @@ spec:
 
             - id: instances
               forEach:
-                - instance: ${${watchInstances}}
+                - instance: ${${watchInstances.filter(i, !has(i.metadata.deletionTimestamp))}}
               template:
                 apiVersion: experimental.kro.run/v1alpha1
                 kind: Graph

@@ -463,7 +463,8 @@ func TestExtractChildScope(t *testing.T) {
 			},
 		}
 		scope := compiler.ExtractChildScopeFromBody(body)
-		assert.Equal(t, []string{"source", "workers"}, scope.NodeIDs)
+		assert.Equal(t, []string{"workers"}, scope.NodeIDs)
+		assert.Equal(t, []string{"source"}, scope.WatchNodeIDs)
 		assert.Equal(t, []string{"w"}, scope.ForEachVars)
 	})
 
