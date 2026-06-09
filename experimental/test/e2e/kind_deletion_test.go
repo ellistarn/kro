@@ -574,3 +574,158 @@ func TestNestedKindDeletionBlocksOnHeldLeaf(t *testing.T) {
 
 	t.Log("NESTED DELETION BLOCKING PROVED: external finalizer on leaf held the entire cascade, then released cleanly")
 }
+
+// TestKindForEachSkipsTerminatingInstances verifies that the Kind controller's
+// forEach does NOT propagate a per-instance Graph for instances that are
+// terminating (have a deletionTimestamp).
+//
+// Without the fix, a create/delete churn loop occurs:
+//   1. Instance is deleted → held in Terminating by a test finalizer
+//   2. Per-instance Graph detects ownerDeleting → self-deletes → teardown → GONE
+//   3. Kind controller's forEach sees the terminating instance still in
+//      watchInstances → SSA-creates a NEW Graph for it
+//   4. New Graph: add finalizer → ownerDeleting → self-delete → teardown → GONE
+//   5. Repeat from step 3 — an unbounded create/delete loop producing API churn
+//      and wasted work for every Kind controller reconcile cycle
+//
+// This is dangerous because:
+//   - Each iteration makes 4+ API calls (create, update, delete, update)
+//   - Under different timing (e.g., slow API, queued reconciles), the new
+//     Graph could reach propagation before ownerDeleting fires, creating
+//     real resources with side effects for a dying instance
+//   - It violates the principle that terminating instances should not have
+//     new infrastructure stamped for them
+//
+// Correct behavior: the forEach filters out instances with a deletionTimestamp.
+// The per-instance Graph is never re-created for a terminating instance.
+func TestKindForEachSkipsTerminatingInstances(t *testing.T) {
+	// Not parallel: tests deletion lifecycle timing with finalizer manipulation.
+	require.NoError(t, waitForCRD(ctx, k8sClient, "kinds.experimental.kro.run", stdlibCRDTimeout))
+
+	ns := "kro-system"
+	group := uniqueGroup()
+
+	// Phase 1: Create a Kind that defines TermWidget → produces a ConfigMap.
+	t.Log("Phase 1: creating Kind: TermWidget")
+	kind := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "experimental.kro.run/v1alpha1",
+		"kind":       "Kind",
+		"metadata": map[string]any{
+			"name":      "termwidget",
+			"namespace": ns,
+		},
+		"spec": map[string]any{
+			"schema": map[string]any{
+				"apiVersion": group + "/v1alpha1",
+				"kind":       "TermWidget",
+				"spec": map[string]any{
+					"message": "string | default=hello",
+				},
+			},
+			"nodes": []any{
+				map[string]any{
+					"id": "cm",
+					"template": map[string]any{
+						"apiVersion": "v1",
+						"kind":       "ConfigMap",
+						"metadata": map[string]any{
+							"name":      "${schema.metadata.name}-term",
+							"namespace": "${schema.metadata.namespace}",
+						},
+						"data": map[string]any{
+							"message": "${schema.spec.message}",
+						},
+					},
+				},
+			},
+		},
+	}}
+	require.NoError(t, k8sClient.Create(ctx, kind))
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), kind) })
+
+	crdName := "termwidgets." + group
+	t.Log("waiting for TermWidget CRD...")
+	require.NoError(t, waitForCRD(ctx, k8sClient, crdName, stdlibCRDTimeout))
+	t.Log("TermWidget CRD established")
+
+	// Phase 2: Create an instance with a test finalizer that we control.
+	// This holds the instance in Terminating after the Graph releases its own finalizer.
+	t.Log("Phase 2: creating TermWidget instance with test finalizer")
+	instanceGVK := schema.GroupVersionKind{Group: group, Version: "v1alpha1", Kind: "TermWidget"}
+	instance := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": group + "/v1alpha1",
+		"kind":       "TermWidget",
+		"metadata": map[string]any{
+			"name":       "tw-inst",
+			"namespace":  ns,
+			"finalizers": []any{"test.kro.run/hold-terminating"},
+		},
+		"spec": map[string]any{"message": "termination-test"},
+	}}
+	require.NoError(t, k8sClient.Create(ctx, instance))
+
+	// Phase 3: Wait for the per-instance Graph and child ConfigMap to appear.
+	graphKey := types.NamespacedName{Name: "kind.termwidget.tw-inst", Namespace: ns}
+	graph := &unstructured.Unstructured{}
+	graph.SetGroupVersionKind(GraphGVK)
+	t.Log("waiting for per-instance Graph...")
+	require.NoError(t, waitForResource(ctx, k8sClient, graphKey, graph, stdlibReconcileTimeout),
+		"per-instance Graph not created")
+
+	cmKey := types.NamespacedName{Name: "tw-inst-term", Namespace: ns}
+	cmObj := &unstructured.Unstructured{}
+	cmObj.SetAPIVersion("v1")
+	cmObj.SetKind("ConfigMap")
+	t.Log("waiting for child ConfigMap...")
+	require.NoError(t, waitForResource(ctx, k8sClient, cmKey, cmObj, stdlibReconcileTimeout),
+		"ConfigMap tw-inst-term not created")
+	t.Log("Phase 3: pipeline converged — Graph and ConfigMap ready")
+
+	// Phase 4: Delete the instance. It will enter Terminating but stay alive
+	// because of our test finalizer (even after the Graph releases its kro finalizer).
+	t.Log("Phase 4: deleting TermWidget instance (held by test finalizer)")
+	require.NoError(t, k8sClient.Delete(ctx, instance))
+
+	// Wait for the instance to enter Terminating.
+	require.NoError(t, wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, stdlibReconcileTimeout, true,
+		func(ctx context.Context) (bool, error) {
+			obj := &unstructured.Unstructured{}
+			obj.SetGroupVersionKind(instanceGVK)
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: "tw-inst", Namespace: ns}, obj); err != nil {
+				return false, nil
+			}
+			return obj.GetDeletionTimestamp() != nil, nil
+		}), "instance should enter Terminating")
+
+	// Phase 5: Wait for the per-instance Graph to be fully deleted.
+	t.Log("Phase 5: waiting for per-instance Graph to complete deletion...")
+	require.NoError(t, waitForDeletion(ctx, k8sClient, GraphGVK, graphKey, stdlibReconcileTimeout),
+		"per-instance Graph should self-delete when owner is terminating")
+	t.Log("Phase 5: Graph deleted — teardown complete")
+
+	// Phase 6: KEY ASSERTION — the Graph must NOT be re-created.
+	// Without the fix, the Kind controller's forEach still includes the
+	// terminating instance in watchInstances and SSA-creates a new Graph.
+	// The new Graph immediately cycles through ownerDeleting → self-delete,
+	// but this is wasteful churn: 4+ API calls per cycle, repeated every
+	// time the Kind controller reconciles.
+	t.Log("Phase 6: asserting Graph stays absent for 5 seconds...")
+	err := waitForAbsence(ctx, k8sClient, GraphGVK, graphKey, 5*time.Second)
+	require.NoError(t, err,
+		"per-instance Graph was re-created for a terminating instance — "+
+			"the Kind controller's forEach should not propagate Graphs for dying instances")
+	t.Log("Phase 6: GOOD — Graph stays absent (no churn loop)")
+
+	// Phase 7: Release our test finalizer — instance should complete deletion.
+	t.Log("Phase 7: releasing test finalizer")
+	require.NoError(t, updateWithRetry(ctx, k8sClient, instanceGVK,
+		types.NamespacedName{Name: "tw-inst", Namespace: ns},
+		func(obj *unstructured.Unstructured) {
+			obj.SetFinalizers(nil)
+		}))
+
+	require.NoError(t, waitForDeletion(ctx, k8sClient, instanceGVK,
+		types.NamespacedName{Name: "tw-inst", Namespace: ns}, stdlibReconcileTimeout),
+		"instance should complete deletion after test finalizer released")
+	t.Log("PROVED: Kind controller does not create/delete Graphs in a loop for terminating instances")
+}
