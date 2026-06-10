@@ -193,8 +193,8 @@ values — can be a CEL expression. This enables dynamic GVKs:
 ```yaml
 - id: watchInstances
   watch:
-    apiVersion: ${${schema.spec.schema.group}}/${${schema.spec.schema.apiVersion}}
-    kind: ${${schema.spec.schema.kind}}
+    apiVersion: ${schema.spec.schema.group}/${schema.spec.schema.apiVersion}
+    kind: ${schema.spec.schema.kind}
     selector: {}
 ```
 
@@ -363,32 +363,31 @@ child Graph — but the combination of `forEach` + template:{kind: Graph} is the
 stamps one child Graph per item in the collection. This is how RGD emerges — a per-RGD Graph stamps
 a per-instance Graph, each with its own scope, its own revisions, and its own lifecycle.
 
-#### Deferral Boundaries
+#### Scopes and Shadowing
 
-Child Graph CEL expressions live as literal strings inside the parent's template. The parent
-compiler sees them as opaque data, not as CEL. The evaluation model uses a nesting convention to
-manage this:
+A nested Graph is a nested lexical scope. A `${}` resolves each free variable up the scope chain —
+child bindings (node ids, spec, the `forEach` item) first, then parent, then grandparent; a closer
+binding shadows a farther one. Nothing marks an expression for deferral: where it evaluates is
+decided by where its variables bind.
 
-- `${...}` — evaluated at the current level
-- `${${...}}` — the outer `${}` is stripped (producing a literal `${...}` string), evaluated one
-  level down by the child's controller
+Every `${}` in a child template evaluates at the child. A variable bound in the child scope resolves
+live, at child reconcile; one bound only in an enclosing scope is captured by the parent at stamp
+time — evaluated once and frozen into the child spec, refreshed when the parent re-stamps.
 
-```yaml
-# Parent Graph (L0) evaluates this — bakes the RGD name into the child spec:
-name: ${rgd.metadata.name}
+When a child shadows a name the parent also binds, qualify with `outer` to reach the enclosing
+binding: `${outer.rgd.metadata.name}` resolves `rgd` one scope up, `outer.outer.` the grandparent.
+Without a collision it is never needed.
 
-# Parent strips outer ${}, child Graph (L1) evaluates the inner expression:
-group: ${${rgd.spec.schema.group}}
-```
-
-This composes to arbitrary depth. `${${${...}}}` defers two levels.
+To let a literal `${...}` survive uninterpreted to a deeper level, wrap it in a CEL string literal:
+`${"${x}"}` yields the literal `${x}`. This is the escape kro uses today; bare nested expressions
+(`${${...}}`) are not valid syntax.
 
 #### Recursive Compilation
 
-When the child template is a Graph, the compiler extracts the child spec, strips one deferral level,
-and runs the full compilation pipeline on it. A typo in a child expression, a type mismatch in a
-child template, or a cycle in a child's dependency graph are all reported on the parent at compile
-time — not deferred until the child CR is created.
+When the child template is a Graph, the compiler runs the full compilation pipeline on the child
+spec within the child scope, resolving each `${}` to its binding level. A typo in a child
+expression, a type mismatch in a child template, or a cycle in a child's dependency graph are all
+reported on the parent at compile time — not deferred until the child CR is created.
 
 ## How RGD Emerges from Graph
 
