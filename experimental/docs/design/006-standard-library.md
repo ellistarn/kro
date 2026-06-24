@@ -77,6 +77,40 @@ last — its expressions reference node IDs from the user's nodes, creating impl
 existing SSA split-apply logic (see [Ownership](003-ownership.md)) handles the separate `/status`
 endpoint.
 
+**Status ownership: only expression fields are written.** The status patch writes only the
+`spec.schema.status` fields whose value is a CEL expression. The classifier is precise: a status
+field is treated as a kro-owned expression **iff its value contains the substring `${`**. Bare-type
+fields (e.g. `ready: boolean`) contain no `${`, so they contribute to the generated CRD status schema
+but are **excluded** from the status write — kro claims no SSA ownership of them. (Edge case of the
+substring rule: a string field whose literal default contains `${`, e.g. `string | default=${x}`,
+is classified as an expression. This same predicate is used on both the write side and the schema
+side; see the contract note below.)
+
+This lets a Kind serve two roles:
+
+- **Reconciling Kind** — status fields are CEL expressions; kro evaluates and owns them.
+- **Schema-authoring Kind** — status fields are bare types (or status is empty); kro generates a
+  typed, validated status schema but writes nothing, leaving the status for an external controller to
+  fill via SSA without 409 contention.
+
+Because kro never writes the bare-type fields, an external SSA writer is their sole field-manager —
+no conflict. The boundary is the `${`: converting a bare-type field to an expression makes kro a
+co-owner of that field. When no expression fields remain, the patch omits the `status` key entirely
+(writing only the GC finalizer), so kro registers no status field-manager at all.
+
+**Classifier contract and mixed-status limitation.** The `${`-substring predicate is implemented in
+two places that MUST agree: the write-side filter in the stdlib `kindInstancePatch` CEL
+(`charts/stdlib/templates/kind.yaml`) and the schema generator's expression check
+(`controller/compiler/celfuncs.go`). `TestStatusFieldClassifier_PredicateParity` guards against drift.
+One limitation today: the schema generator emits a typed status schema only when **no** status field
+is an expression. So a Kind that *mixes* expression and bare-type status fields gets correct
+write-side ownership (only expression fields written) but no OpenAPI typing on its bare-type fields
+(the whole status block falls back to `x-kubernetes-preserve-unknown-fields`). Per-field typing in
+the mixed case is a follow-up; `TestStdlibKindMixedStatus_Regression` pins the current behavior and
+must be updated when the generator learns to partition fields.
+
+
+
 A Kind may declare `readyWhen` and `propagateWhen` at the spec level. Both are per-instance — they
 evaluate in the same scope as the Kind's nodes.
 

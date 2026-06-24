@@ -180,6 +180,20 @@ spec:
               forEach:
                 - instance: ${${watchInstances.filter(i, !has(i.metadata.deletionTimestamp))}}
               propagateWhen: "${k.spec.propagateWhen}"
+              # The per-instance Graph's node list is built as:
+              #   [schema ref] + user nodes + [kindInstancePatch].
+              # kindInstancePatch writes the GC finalizer plus the status fields
+              # kro owns. A status field is kro-owned iff its value is a CEL
+              # expression (contains "${"); bare-type fields (e.g. "boolean") are
+              # schema-only and left for an external controller to fill.
+              # transformMap below keeps only the expression fields; when none
+              # remain, the status key is omitted entirely so kro registers no
+              # status field-manager.
+              #
+              # Classification contract: the val.contains("${") predicate MUST
+              # stay identical to the schema generator's hasExpressions check in
+              # controller/compiler/celfuncs.go. If they drift, schema typing and
+              # write ownership disagree on which fields kro owns.
               template:
                 apiVersion: experimental.kro.run/v1alpha1
                 kind: Graph
@@ -205,16 +219,29 @@ spec:
                         }
                       }}]
                       + k.spec.nodes
-                      + [{"id": "kindInstancePatch", "patch": {
-                          "apiVersion": k.spec.schema.apiVersion,
-                          "kind": k.spec.schema.kind,
-                          "metadata": {
-                            "name": instance.metadata.name,
-                            "namespace": instance.metadata.?namespace.orValue(""),
-                            "finalizers": ["experimental.kro.run/graph"]
-                          },
-                          "status": k.spec.schema.status
-                        }}]
+                      + [{"id": "kindInstancePatch", "patch":
+                          k.spec.schema.status.transformMap(key, val, val.contains("${"), val) == {} ?
+                            {
+                              "apiVersion": k.spec.schema.apiVersion,
+                              "kind": k.spec.schema.kind,
+                              "metadata": {
+                                "name": instance.metadata.name,
+                                "namespace": instance.metadata.?namespace.orValue(""),
+                                "finalizers": ["experimental.kro.run/graph"]
+                              }
+                            }
+                          :
+                            {
+                              "apiVersion": k.spec.schema.apiVersion,
+                              "kind": k.spec.schema.kind,
+                              "metadata": {
+                                "name": instance.metadata.name,
+                                "namespace": instance.metadata.?namespace.orValue(""),
+                                "finalizers": ["experimental.kro.run/graph"]
+                              },
+                              "status": k.spec.schema.status.transformMap(key, val, val.contains("${"), val)
+                            }
+                        }]
                     }}
 
             - id: kindCount
