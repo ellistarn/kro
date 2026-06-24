@@ -152,7 +152,24 @@ func celSimpleSchemaFunction() []cel.EnvOption {
 			},
 		}
 
-		// Convert status types if present (skip runtime ${} expressions)
+		// Convert status types if present (skip runtime ${} expressions).
+		//
+		// Field-classification contract: a status field is an "expression"
+		// (kro-owned, projected at runtime) iff its value contains "${". This
+		// predicate MUST stay identical to the write-side filter in the stdlib
+		// kindInstancePatch node (charts/stdlib/templates/kind.yaml:
+		// `transformMap(key, val, val.contains("${"), val)`). If the two drift,
+		// the schema side and the write side will disagree on which fields kro
+		// owns.
+		//
+		// Limitation (mixed status): if ANY field is an expression, this skips
+		// typed-schema generation for the WHOLE status block (falls back to the
+		// permissive preserve-unknown status below). So a Kind that mixes
+		// expression and bare-type status fields gets correct write-side
+		// ownership (only expression fields are written) but no OpenAPI typing
+		// on the bare-type fields. Pure bare-type status (no expressions) is
+		// typed; pure-expression status is permissive. Per-field typing in the
+		// mixed case requires partitioning here too — tracked as a follow-up.
 		if statusMap, ok := schemaMap["status"].(map[string]any); ok && len(statusMap) > 0 {
 			hasExpressions := false
 			for _, v := range statusMap {
